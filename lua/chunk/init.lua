@@ -9,23 +9,88 @@ local states = setmetatable({}, {
 	__mode = "k",
 })
 
+local augroup = vim.api.nvim_create_augroup("chunk", {
+	clear = false,
+})
+
 local function notify(message, level)
 	vim.notify(message, level or vim.log.levels.INFO, {
 		title = "chunk",
 	})
 end
 
-local function rendered_lines_for_diff(diff)
+local function valid_buf(buf)
+	return buf and vim.api.nvim_buf_is_valid(buf)
+end
+
+local function valid_win(win)
+	return win and vim.api.nvim_win_is_valid(win)
+end
+
+local function focus_window(win)
+	if valid_win(win) then
+		vim.api.nvim_set_current_win(win)
+	end
+end
+
+local function set_cursor_row(win, buf, row)
+	if not row or not valid_win(win) or not valid_buf(buf) then
+		return
+	end
+
+	local last_line = math.max(1, vim.api.nvim_buf_line_count(buf))
+	pcall(vim.api.nvim_win_set_cursor, win, { math.min(math.max(1, row), last_line), 0 })
+end
+
+local function file_path_for_line(line)
+	if not line then
+		return nil
+	end
+
+	if line.file then
+		return line.file.new_path or line.file.old_path
+	end
+
+	return line.new_path or line.old_path
+end
+
+local function build_file_items(rendered)
+	local files = {}
+
+	for line_number, line in ipairs(rendered) do
+		if line.kind == "file_header" then
+			local file = line.file
+			table.insert(files, {
+				path = file_path_for_line(line) or "(unknown)",
+				status = file and file.status or "modified",
+				is_binary = file and file.is_binary or false,
+				start_line = line_number,
+				file = file,
+			})
+		end
+	end
+
+	return files
+end
+
+local function render_model_for_diff(diff)
 	if diff == "" then
 		return {
-			{
-				kind = "empty",
-				text = "No changes against HEAD",
+			lines = {
+				{
+					kind = "empty",
+					text = "No changes against HEAD",
+				},
 			},
+			files = {},
 		}
 	end
 
-	return parser.flatten(parser.parse(diff))
+	local rendered = parser.flatten(parser.parse(diff))
+	return {
+		lines = rendered,
+		files = build_file_items(rendered),
+	}
 end
 
 local function collect_diff(start_dir)
@@ -54,10 +119,161 @@ local function current_buffer_state()
 end
 
 local function set_buffer_state(buf, state)
-	states[buf] = state
+	if valid_buf(buf) then
+		states[buf] = state
+	end
 end
 
-local function apply_keymaps(buf)
+local function clear_buffer_state(buf)
+	if buf then
+		states[buf] = nil
+	end
+end
+
+local function clear_view_state(state)
+	clear_buffer_state(state.diff_buf)
+	clear_buffer_state(state.files_buf)
+end
+
+local function set_view_state(state)
+	set_buffer_state(state.diff_buf, state)
+	set_buffer_state(state.files_buf, state)
+end
+
+local function render_files_panel(state)
+	if not valid_buf(state.files_buf) then
+		return
+	end
+
+	render.render_files(state.files_buf, state.file_items, state.selected_file_index)
+	set_buffer_state(state.files_buf, state)
+end
+
+local function render_model_into_view(state, model)
+	state.line_map = model.lines
+	state.file_items = model.files
+
+	if valid_buf(state.diff_buf) then
+		render.render(state.diff_buf, model.lines)
+	end
+
+	render_files_panel(state)
+	set_view_state(state)
+end
+
+local function file_index_for_diff_line(state, row)
+	local current = nil
+
+	for index, file in ipairs(state.file_items) do
+		if file.start_line > row then
+			break
+		end
+
+		current = index
+	end
+
+	return current
+end
+
+local function file_index_for_path(state, path)
+	if not path then
+		return nil
+	end
+
+	for index, file in ipairs(state.file_items) do
+		if file.path == path then
+			return index
+		end
+	end
+end
+
+local function set_selected_file(state, index)
+	local file = index and state.file_items[index] or nil
+
+	state.selected_file_index = file and index or nil
+	state.selected_file_path = file and file.path or nil
+
+	return file
+end
+
+local function file_path_at_panel_row(state, row)
+	local file = row and state.file_items[row] or nil
+
+	return file and file.path or state.selected_file_path
+end
+
+local function sync_selection_to_diff_cursor(state)
+	if state.syncing_selection or not valid_win(state.diff_win) then
+		return
+	end
+
+	local row = vim.api.nvim_win_get_cursor(state.diff_win)[1]
+	local index = file_index_for_diff_line(state, row)
+
+	if state.selected_file_index == index then
+		set_selected_file(state, index)
+		return
+	end
+
+	set_selected_file(state, index)
+	render_files_panel(state)
+
+	if index then
+		set_cursor_row(state.files_win, state.files_buf, index)
+	end
+end
+
+local function select_file(state, index, opts)
+	opts = opts or {}
+
+	local file = state.file_items[index]
+	if not file then
+		return
+	end
+
+	state.syncing_selection = true
+	set_selected_file(state, index)
+	render_files_panel(state)
+
+	set_cursor_row(state.files_win, state.files_buf, index)
+
+	if valid_win(state.diff_win) and valid_buf(state.diff_buf) then
+		set_cursor_row(state.diff_win, state.diff_buf, file.start_line)
+		pcall(vim.api.nvim_win_call, state.diff_win, function()
+			vim.cmd("normal! zz")
+		end)
+	end
+
+	state.syncing_selection = false
+
+	if opts.focus_diff ~= false then
+		focus_window(state.diff_win)
+	end
+end
+
+local function restore_files_panel_selection(state, row, path)
+	local selected = file_index_for_path(state, path)
+	if not selected and row and #state.file_items > 0 then
+		selected = math.min(row, #state.file_items)
+	end
+
+	if selected then
+		select_file(state, selected, {
+			focus_diff = false,
+		})
+		return
+	end
+
+	set_selected_file(state, nil)
+	render_files_panel(state)
+end
+
+local function set_file_navigation_keymaps(buf, maps, next_file, prev_file)
+	set_keymap(buf, maps.next_file, next_file, "Next file")
+	set_keymap(buf, maps.prev_file, prev_file, "Previous file")
+end
+
+local function apply_diff_keymaps(buf)
 	local maps = config.options.keymaps
 
 	set_keymap(buf, maps.open_file, M.open_file_at_cursor, "Open changed file")
@@ -68,13 +284,76 @@ local function apply_keymaps(buf)
 	set_keymap(buf, maps.prev_hunk, function()
 		M.jump("hunk", -1)
 	end, "Previous hunk")
-	set_keymap(buf, maps.next_file, function()
+	set_file_navigation_keymaps(buf, maps, function()
 		M.jump("file_header", 1)
-	end, "Next file")
-	set_keymap(buf, maps.prev_file, function()
+	end, function()
 		M.jump("file_header", -1)
-	end, "Previous file")
+	end)
 	set_keymap(buf, maps.close, M.close, "Close Chunk diff")
+end
+
+local function apply_files_keymaps(buf)
+	local maps = config.options.keymaps
+
+	set_keymap(buf, maps.select_file, M.select_file_at_cursor, "Show selected file diff")
+	set_keymap(buf, maps.refresh, M.refresh, "Refresh Chunk diff")
+	set_file_navigation_keymaps(buf, maps, function()
+		M.select_relative_file(1)
+	end, function()
+		M.select_relative_file(-1)
+	end)
+	set_keymap(buf, maps.close, M.close, "Close Chunk diff")
+end
+
+local function files_panel_config()
+	local panel = config.options.files_panel
+	if panel == false then
+		return {
+			enabled = false,
+			width = 0,
+		}
+	end
+
+	panel = type(panel) == "table" and panel or {}
+	return {
+		enabled = panel.enabled ~= false,
+		width = math.max(1, math.floor(tonumber(panel.width) or 30)),
+	}
+end
+
+local files_window_options = {
+	{ "number", false },
+	{ "relativenumber", false },
+	{ "signcolumn", "no" },
+	{ "foldcolumn", "0" },
+	{ "wrap", false },
+	{ "cursorline", true },
+	{ "winfixwidth", true },
+}
+
+local function configure_files_window(win, width)
+	for _, option in ipairs(files_window_options) do
+		vim.api.nvim_set_option_value(option[1], option[2], { win = win })
+	end
+
+	pcall(vim.api.nvim_win_set_width, win, width)
+end
+
+local function open_files_panel(diff_win)
+	local panel = files_panel_config()
+	if not panel.enabled then
+		return nil, nil
+	end
+
+	vim.cmd(("leftabove vertical %dnew"):format(panel.width))
+
+	local files_win = vim.api.nvim_get_current_win()
+	local files_buf = vim.api.nvim_get_current_buf()
+
+	configure_files_window(files_win, panel.width)
+	focus_window(diff_win)
+
+	return files_win, files_buf
 end
 
 local function open_diff_view()
@@ -90,19 +369,18 @@ local function open_diff_view()
 		vim.cmd.tabnew()
 	end
 
-	return vim.api.nvim_get_current_buf(), origin_tab, origin_win
-end
+	local diff_win = vim.api.nvim_get_current_win()
+	local diff_buf = vim.api.nvim_get_current_buf()
+	local files_win, files_buf = open_files_panel(diff_win)
 
-local function file_path_for_line(line)
-	if not line then
-		return nil
-	end
-
-	if line.file then
-		return line.file.new_path or line.file.old_path
-	end
-
-	return line.new_path or line.old_path
+	return {
+		diff_buf = diff_buf,
+		diff_win = diff_win,
+		files_buf = files_buf,
+		files_win = files_win,
+		origin_tab = origin_tab,
+		origin_win = origin_win,
+	}
 end
 
 local function find_file_target(state, start, stop, step)
@@ -138,10 +416,58 @@ local function restore_origin_window(state)
 	end
 end
 
-local function render_lines_into_buffer(buf, state, rendered)
-	state.line_map = rendered
-	render.render(buf, rendered)
-	set_buffer_state(buf, state)
+local function close_window(win)
+	if valid_win(win) then
+		pcall(vim.api.nvim_win_close, win, true)
+	end
+end
+
+local function delete_buffer(buf)
+	if valid_buf(buf) then
+		pcall(vim.api.nvim_buf_delete, buf, {
+			force = true,
+		})
+	end
+end
+
+local function close_view(state)
+	close_window(state.files_win)
+	close_window(state.diff_win)
+	delete_buffer(state.files_buf)
+	delete_buffer(state.diff_buf)
+
+	if state.open_mode ~= "current" then
+		restore_origin_window(state)
+	end
+
+	clear_view_state(state)
+end
+
+local function apply_autocmds(state)
+	for _, buf in ipairs({ state.diff_buf, state.files_buf }) do
+		if valid_buf(buf) then
+			vim.api.nvim_create_autocmd("BufWipeout", {
+				group = augroup,
+				buffer = buf,
+				callback = function(args)
+					clear_buffer_state(args.buf)
+				end,
+			})
+		end
+	end
+
+	if valid_buf(state.diff_buf) then
+		vim.api.nvim_create_autocmd("CursorMoved", {
+			group = augroup,
+			buffer = state.diff_buf,
+			callback = function(args)
+				local current = states[args.buf]
+				if current then
+					sync_selection_to_diff_cursor(current)
+				end
+			end,
+		})
+	end
 end
 
 function M.setup(opts)
@@ -156,29 +482,56 @@ function M.open()
 		return
 	end
 
-	local buf, origin_tab, origin_win = open_diff_view()
+	local view = open_diff_view()
 	local state = {
 		root = collected.root,
-		origin_tab = origin_tab,
-		origin_win = origin_win,
+		origin_tab = view.origin_tab,
+		origin_win = view.origin_win,
 		open_mode = config.options.open_mode,
+		diff_buf = view.diff_buf,
+		diff_win = view.diff_win,
+		files_buf = view.files_buf,
+		files_win = view.files_win,
 		line_map = {},
+		file_items = {},
+		selected_file_index = nil,
+		selected_file_path = nil,
 	}
 
-	render.prepare_buffer(buf, ("chunk://%s/%d"):format(collected.root, buf))
-	local rendered = rendered_lines_for_diff(collected.diff)
-	render_lines_into_buffer(buf, state, rendered)
-	apply_keymaps(buf)
+	render.prepare_buffer(state.diff_buf, ("chunk://%s/%d"):format(collected.root, state.diff_buf))
+	if valid_buf(state.files_buf) then
+		render.prepare_files_buffer(state.files_buf, ("chunk://%s/files/%d"):format(collected.root, state.files_buf))
+	end
+
+	render_model_into_view(state, render_model_for_diff(collected.diff))
+	if #state.file_items > 0 then
+		select_file(state, 1, {
+			focus_diff = false,
+		})
+	end
+
+	apply_diff_keymaps(state.diff_buf)
+	if valid_buf(state.files_buf) then
+		apply_files_keymaps(state.files_buf)
+	end
+	apply_autocmds(state)
+
+	focus_window(state.diff_win)
 end
 
 function M.refresh()
 	local state = current_buffer_state()
-	if not state then
+	if not state or not valid_buf(state.diff_buf) then
 		M.open()
 		return
 	end
 
-	local cursor = vim.api.nvim_win_get_cursor(0)
+	local current_buf = vim.api.nvim_get_current_buf()
+	local current_win = vim.api.nvim_get_current_win()
+	local current_is_files_panel = current_buf == state.files_buf
+	local files_cursor = current_is_files_panel and vim.api.nvim_win_get_cursor(0)[1] or nil
+	local selected_path = current_is_files_panel and file_path_at_panel_row(state, files_cursor) or nil
+	local diff_cursor = valid_win(state.diff_win) and vim.api.nvim_win_get_cursor(state.diff_win) or { 1, 0 }
 	local collected, err = collect_diff(state.root)
 	if not collected then
 		notify(err, vim.log.levels.ERROR)
@@ -186,17 +539,64 @@ function M.refresh()
 	end
 
 	state.root = collected.root
-	local rendered = rendered_lines_for_diff(collected.diff)
-	render_lines_into_buffer(vim.api.nvim_get_current_buf(), state, rendered)
+	render_model_into_view(state, render_model_for_diff(collected.diff))
 
-	local last_line = math.max(1, vim.api.nvim_buf_line_count(0))
-	cursor[1] = math.min(cursor[1], last_line)
-	vim.api.nvim_win_set_cursor(0, cursor)
+	if current_is_files_panel then
+		restore_files_panel_selection(state, files_cursor, selected_path)
+		focus_window(current_win)
+		return
+	end
+
+	if valid_win(state.diff_win) then
+		local last_line = math.max(1, vim.api.nvim_buf_line_count(state.diff_buf))
+		diff_cursor[1] = math.min(diff_cursor[1], last_line)
+		vim.api.nvim_win_set_cursor(state.diff_win, diff_cursor)
+	end
+	sync_selection_to_diff_cursor(state)
+end
+
+function M.select_file_at_cursor()
+	local state = current_buffer_state()
+	if not state then
+		return
+	end
+
+	local row = vim.api.nvim_win_get_cursor(0)[1]
+	select_file(state, row, {
+		focus_diff = true,
+	})
+end
+
+function M.select_relative_file(direction)
+	local state = current_buffer_state()
+	if not state then
+		return
+	end
+
+	local current_buf = vim.api.nvim_get_current_buf()
+	local current = current_buf == state.files_buf and vim.api.nvim_win_get_cursor(0)[1] or state.selected_file_index
+	if not current and valid_win(state.diff_win) then
+		current = file_index_for_diff_line(state, vim.api.nvim_win_get_cursor(state.diff_win)[1])
+	end
+
+	local next_index = (current or 0) + direction
+	if next_index < 1 or next_index > #state.file_items then
+		return
+	end
+
+	select_file(state, next_index, {
+		focus_diff = current_buf ~= state.files_buf,
+	})
 end
 
 function M.open_file_at_cursor()
 	local state = current_buffer_state()
 	if not state then
+		return
+	end
+
+	if vim.api.nvim_get_current_buf() == state.files_buf then
+		M.select_file_at_cursor()
 		return
 	end
 
@@ -223,14 +623,21 @@ function M.jump(kind, direction)
 		return
 	end
 
-	local cursor = vim.api.nvim_win_get_cursor(0)
+	if vim.api.nvim_get_current_buf() == state.files_buf and kind == "file_header" then
+		M.select_relative_file(direction)
+		return
+	end
+
+	local target_win = valid_win(state.diff_win) and state.diff_win or vim.api.nvim_get_current_win()
+	local cursor = vim.api.nvim_win_get_cursor(target_win)
 	local start = cursor[1] + direction
 	local stop = direction > 0 and #state.line_map or 1
 
 	for index = start, stop, direction do
 		local line = state.line_map[index]
 		if line and line.kind == kind then
-			vim.api.nvim_win_set_cursor(0, { index, 0 })
+			vim.api.nvim_win_set_cursor(target_win, { index, 0 })
+			sync_selection_to_diff_cursor(state)
 			return
 		end
 	end
@@ -244,9 +651,8 @@ function M.close()
 		return
 	end
 
-	local current_tab = vim.api.nvim_get_current_tabpage()
-	if state and state.open_mode == "split" and #vim.api.nvim_tabpage_list_wins(current_tab) > 1 then
-		pcall(vim.cmd.close)
+	if state then
+		close_view(state)
 		return
 	end
 

@@ -2,9 +2,10 @@
 
 Inline Git diff review for Neovim.
 
-`chunk` opens a readonly unified diff buffer in a dedicated tab. It compares
-`HEAD` against the working tree, includes untracked files, and keeps metadata
-for each rendered line so future features can open and edit real files safely.
+`chunk` opens a readonly unified diff buffer with a changed-files sidebar in a
+dedicated tab. It compares `HEAD` against the working tree, includes untracked
+files, and keeps metadata for each rendered line so future features can open
+and edit real files safely.
 
 ## Requirements
 
@@ -29,6 +30,7 @@ With lazy.nvim from this local checkout:
 - `:Chunk` opens the inline diff view.
 - `:ChunkRefresh` refreshes the current Chunk buffer.
 - `<CR>` opens the real file at the diff line.
+- `<CR>` in the files sidebar selects a changed file and shows its diff.
 - `R` refreshes.
 - `]h` and `[h` jump between hunks.
 - `]f` and `[f` jump between files.
@@ -41,8 +43,13 @@ require("chunk").setup({
   context_lines = 3,
   include_untracked = true,
   open_mode = "tab",
+  files_panel = {
+    enabled = true,
+    width = 30,
+  },
   keymaps = {
     open_file = "<CR>",
+    select_file = "<CR>",
     refresh = "R",
     next_hunk = "]h",
     prev_hunk = "[h",
