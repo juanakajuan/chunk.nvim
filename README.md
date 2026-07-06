@@ -30,7 +30,7 @@ With lazy.nvim from this local checkout:
 - `:ChunkRefresh` refreshes the current Chunk buffer.
 - `<CR>` opens the real file at the diff line.
 - `R` refreshes.
-- `]c` and `[c` jump between hunks.
+- `]h` and `[h` jump between hunks.
 - `]f` and `[f` jump between files.
 - `q` closes the Chunk tab.
 
@@ -44,8 +44,8 @@ require("chunk").setup({
   keymaps = {
     open_file = "<CR>",
     refresh = "R",
-    next_hunk = "]c",
-    prev_hunk = "[c",
+    next_hunk = "]h",
+    prev_hunk = "[h",
     next_file = "]f",
     prev_file = "[f",
     close = "q",
