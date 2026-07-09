@@ -1,5 +1,11 @@
 local M = {}
 
+local hunk_line_kinds = {
+	[" "] = "context",
+	["+"] = "add",
+	["-"] = "delete",
+}
+
 local function strip_prefix_path(path)
 	if not path or path == "/dev/null" then
 		return nil
@@ -25,8 +31,19 @@ local function parse_hunk_header(line)
 	}
 end
 
+local function build_patch(header, body)
+	local lines = {}
+	vim.list_extend(lines, header)
+	vim.list_extend(lines, body)
+	return table.concat(lines, "\n") .. "\n"
+end
+
 local function push_file(files, current)
 	if current then
+		for _, hunk in ipairs(current.hunks) do
+			hunk.patch = build_patch(current.patch_header, hunk.patch_lines)
+		end
+
 		table.insert(files, current)
 	end
 end
@@ -34,6 +51,7 @@ end
 local function append_line(file, line)
 	line.old_path = file.old_path
 	line.new_path = file.new_path
+	line.section = file.section
 	table.insert(file.lines, line)
 end
 
@@ -44,15 +62,17 @@ local function append_meta_line(file, raw)
 	})
 end
 
-local function new_file(line)
+local function new_file(line, section)
 	local old_path, new_path = line:match("^diff %-%-git a/(.+) b/(.+)$")
 
 	return {
 		old_path = old_path,
 		new_path = new_path,
+		section = section,
 		status = "modified",
 		is_binary = false,
 		hunks = {},
+		patch_header = { line },
 		lines = {
 			{
 				kind = "file_header",
@@ -83,6 +103,8 @@ local function append_fallback_line(file, raw, current_hunk, new_line)
 end
 
 local function begin_hunk(file, raw, hunk)
+	hunk.section = file.section
+	hunk.patch_lines = { raw }
 	table.insert(file.hunks, hunk)
 
 	local old_line = hunk.old_start
@@ -102,46 +124,47 @@ end
 
 local function append_hunk_body_line(file, raw, hunk, old_line, new_line)
 	local prefix = raw:sub(1, 1)
+	local kind = hunk_line_kinds[prefix]
 
-	if prefix == " " then
-		append_line(file, {
-			kind = "context",
-			text = raw,
-			old_line = old_line,
-			new_line = new_line,
-			target_line = new_line,
-			hunk = hunk,
-		})
-		return hunk, old_line + 1, new_line + 1
+	if not kind then
+		append_fallback_line(file, raw, hunk, new_line)
+		return hunk, old_line, new_line
 	end
 
-	if prefix == "+" then
-		append_line(file, {
-			kind = "add",
-			text = raw,
-			new_line = new_line,
-			target_line = new_line,
-			hunk = hunk,
-		})
-		return hunk, old_line, new_line + 1
+	local line = {
+		kind = kind,
+		text = raw,
+		target_line = new_line,
+		hunk = hunk,
+	}
+
+	if prefix ~= "+" then
+		line.old_line = old_line
+		old_line = old_line + 1
 	end
 
-	if prefix == "-" then
-		append_line(file, {
-			kind = "delete",
-			text = raw,
-			old_line = old_line,
-			target_line = new_line,
-			hunk = hunk,
-		})
-		return hunk, old_line + 1, new_line
+	if prefix ~= "-" then
+		line.new_line = new_line
+		new_line = new_line + 1
 	end
 
-	append_fallback_line(file, raw, hunk, new_line)
+	append_line(file, line)
 	return hunk, old_line, new_line
 end
 
 local function parse_file_line(file, raw, current_hunk, old_line, new_line)
+	local hunk = parse_hunk_header(raw)
+	if hunk then
+		return begin_hunk(file, raw, hunk)
+	end
+
+	if current_hunk then
+		table.insert(current_hunk.patch_lines, raw)
+		return append_hunk_body_line(file, raw, current_hunk, old_line, new_line)
+	end
+
+	table.insert(file.patch_header, raw)
+
 	if raw:match("^%-%-%- ") then
 		file.old_path = strip_prefix_path(raw:sub(5))
 		append_meta_line(file, raw)
@@ -178,30 +201,27 @@ local function parse_file_line(file, raw, current_hunk, old_line, new_line)
 		return current_hunk, old_line, new_line
 	end
 
-	local hunk = parse_hunk_header(raw)
-	if hunk then
-		return begin_hunk(file, raw, hunk)
-	end
-
-	if current_hunk then
-		return append_hunk_body_line(file, raw, current_hunk, old_line, new_line)
-	end
-
 	append_fallback_line(file, raw, current_hunk, new_line)
 	return current_hunk, old_line, new_line
 end
 
-function M.parse(diff)
+function M.parse(diff, opts)
+	opts = opts or {}
+	local section = type(opts) == "string" and opts or opts.section
 	local files = {}
 	local current_file = nil
 	local current_hunk = nil
 	local old_line = nil
 	local new_line = nil
 
-	for raw in (diff .. "\n"):gmatch("([^\n]*)\n") do
+	if diff ~= "" and diff:sub(-1) ~= "\n" then
+		diff = diff .. "\n"
+	end
+
+	for raw in diff:gmatch("([^\n]*)\n") do
 		if raw:match("^diff %-%-git ") then
 			push_file(files, current_file)
-			current_file = new_file(raw)
+			current_file = new_file(raw, section)
 			current_hunk = nil
 			old_line = nil
 			new_line = nil
@@ -225,11 +245,13 @@ function M.flatten(parsed)
 			table.insert(lines, {
 				kind = "blank",
 				text = "",
+				section = file.section,
 			})
 		end
 
 		for _, line in ipairs(file.lines) do
 			line.file = file
+			line.section = file.section
 			table.insert(lines, line)
 		end
 	end

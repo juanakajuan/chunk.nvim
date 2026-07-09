@@ -72,10 +72,48 @@ local function test_untracked_binary_placeholder()
 	assert_equal(find_line(lines, "binary", "Binary file asset.bin added").target_line, 1, "binary target line")
 end
 
+local function test_section_identity_and_exact_hunk_patch()
+	local diff = [[diff --git a/foo.txt b/foo.txt
+index 1234567..abcdef0 100644
+--- a/foo.txt
++++ b/foo.txt
+@@ -1 +1 @@
+-old one
++new one
+@@ -10 +10 @@
+-old ten
++new ten
+]]
+
+	local parsed = parser.parse(diff, {
+		section = "unstaged",
+	})
+	local file = parsed.files[1]
+	assert_equal(file.section, "unstaged", "file section")
+	assert_equal(file.hunks[1].section, "unstaged", "hunk section")
+	assert_equal(
+		file.hunks[1].patch,
+		[[diff --git a/foo.txt b/foo.txt
+index 1234567..abcdef0 100644
+--- a/foo.txt
++++ b/foo.txt
+@@ -1 +1 @@
+-old one
++new one
+]],
+		"first hunk patch"
+	)
+	assert_equal(file.hunks[1].patch:find("old ten", 1, true), nil, "patch excludes unrelated hunk")
+
+	local lines = parser.flatten(parsed)
+	assert_equal(find_line(lines, "add", "+new one").section, "unstaged", "rendered line section")
+end
+
 local tests = {
 	test_parser_metadata,
 	test_untracked_synthetic_diff,
 	test_untracked_binary_placeholder,
+	test_section_identity_and_exact_hunk_patch,
 }
 
 for _, test in ipairs(tests) do

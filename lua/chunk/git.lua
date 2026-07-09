@@ -1,18 +1,33 @@
 local M = {}
 
+local function failure_message(result)
+	for _, output in ipairs({ result.stderr or "", result.stdout or "" }) do
+		if output ~= "" then
+			return vim.trim(output)
+		end
+	end
+
+	return "git command failed"
+end
+
 local function run(argv, opts)
 	opts = opts or {}
 
 	local result = vim.system(argv, {
 		cwd = opts.cwd,
+		stdin = opts.stdin,
 		text = true,
 	}):wait()
 
 	if result.code ~= 0 then
-		return nil, vim.trim(result.stderr or result.stdout or "git command failed")
+		return nil, failure_message(result)
 	end
 
 	return result.stdout or "", nil
+end
+
+local function run_git(root, argv, opts)
+	return run(vim.list_extend({ "git", "-C", root }, argv), opts)
 end
 
 local function dirname(path)
@@ -22,7 +37,7 @@ end
 function M.repo_root(start)
 	start = start or vim.fn.getcwd()
 
-	local root, err = run({ "git", "-C", start, "rev-parse", "--show-toplevel" })
+	local root, err = run_git(start, { "rev-parse", "--show-toplevel" })
 	if not root then
 		return nil, err
 	end
@@ -39,30 +54,24 @@ function M.current_start_dir()
 	return vim.fn.getcwd()
 end
 
-local function shell_out_diff(root, context_lines)
-	local has_head = run({ "git", "-C", root, "rev-parse", "--verify", "HEAD" })
-	if not has_head then
-		return "", nil
-	end
-
-	return run({
-		"git",
-		"-C",
-		root,
+local function tracked_diff(root, context_lines, cached)
+	local argv = {
 		"diff",
 		"--no-color",
 		"--no-ext-diff",
 		"--unified=" .. tostring(context_lines),
-		"HEAD",
-		"--",
-	})
+	}
+
+	if cached then
+		table.insert(argv, "--cached")
+	end
+
+	table.insert(argv, "--")
+	return run_git(root, argv)
 end
 
 local function list_untracked(root)
-	local out, err = run({
-		"git",
-		"-C",
-		root,
+	local out, err = run_git(root, {
 		"ls-files",
 		"--others",
 		"--exclude-standard",
@@ -193,27 +202,71 @@ function M.collect(opts)
 		return nil, root_err
 	end
 
-	local tracked, tracked_err = shell_out_diff(root, opts.context_lines or 3)
-	if not tracked then
-		return nil, tracked_err
+	local context_lines = opts.context_lines or 3
+	local unstaged, unstaged_err = tracked_diff(root, context_lines, false)
+	if not unstaged then
+		return nil, unstaged_err
 	end
 
-	if opts.include_untracked == false then
-		return {
-			root = root,
-			diff = tracked,
-		}, nil
+	local staged, staged_err = tracked_diff(root, context_lines, true)
+	if not staged then
+		return nil, staged_err
 	end
 
-	local untracked, untracked_err = collect_untracked_diffs(root)
-	if not untracked then
-		return nil, untracked_err
+	if opts.include_untracked ~= false then
+		local untracked, untracked_err = collect_untracked_diffs(root)
+		if not untracked then
+			return nil, untracked_err
+		end
+
+		unstaged = unstaged .. untracked
 	end
 
 	return {
 		root = root,
-		diff = tracked .. untracked,
-	}, nil
+		sections = {
+			{
+				id = "unstaged",
+				title = "Changes",
+				diff = unstaged,
+			},
+			{
+				id = "staged",
+				title = "Staged Changes",
+				diff = staged,
+			},
+		},
+	},
+		nil
+end
+
+local function apply_cached_patch(root, patch, reverse)
+	local argv = {
+		"apply",
+		"--cached",
+	}
+
+	if reverse then
+		table.insert(argv, "--reverse")
+	end
+
+	local _, err = run_git(root, argv, {
+		stdin = patch,
+	})
+
+	if err then
+		return nil, err
+	end
+
+	return true, nil
+end
+
+function M.stage_hunk(root, patch)
+	return apply_cached_patch(root, patch, false)
+end
+
+function M.unstage_hunk(root, patch)
+	return apply_cached_patch(root, patch, true)
 end
 
 return M

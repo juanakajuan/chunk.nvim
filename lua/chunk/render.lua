@@ -9,6 +9,7 @@ local highlights = {
 	ChunkDelete = "DiffDelete",
 	ChunkMeta = "Comment",
 	ChunkBinary = "WarningMsg",
+	ChunkSection = "Title",
 	ChunkFileSelected = "Visual",
 }
 
@@ -20,6 +21,7 @@ local line_highlights = {
 	meta = "ChunkMeta",
 	no_newline = "ChunkMeta",
 	binary = "ChunkBinary",
+	section_heading = "ChunkSection",
 	empty = "ChunkMeta",
 }
 
@@ -60,16 +62,21 @@ local function file_status(status)
 	return file_statuses[status] or default_file_status
 end
 
-local function file_panel_lines(files)
-	if #files == 0 then
+local function file_panel_lines(items)
+	if #items == 0 then
 		return { "No changed files" }
 	end
 
 	local lines = {}
-	for _, file in ipairs(files) do
-		local status = file_status(file.status)
-		local suffix = file.is_binary and " [binary]" or ""
-		table.insert(lines, (" %s %s%s"):format(status.label, file.path, suffix))
+	for _, item in ipairs(items) do
+		if item.kind == "section_heading" then
+			table.insert(lines, item.text)
+		else
+			local file = item.file
+			local status = file_status(file.status)
+			local suffix = file.is_binary and " [binary]" or ""
+			table.insert(lines, (" %s %s%s"):format(status.label, file.path, suffix))
+		end
 	end
 
 	return lines
@@ -103,24 +110,29 @@ function M.render(buf, rendered)
 	end)
 end
 
-local function apply_file_highlights(buf, files, selected_index)
-	if #files == 0 then
+local function apply_file_highlights(buf, items, selected_index)
+	if #items == 0 then
 		vim.api.nvim_buf_add_highlight(buf, ns, "ChunkMeta", 0, 0, -1)
 		return
 	end
 
-	for index, file in ipairs(files) do
-		if index == selected_index then
-			vim.api.nvim_buf_add_highlight(buf, ns, "ChunkFileSelected", index - 1, 0, -1)
-		end
+	for row, item in ipairs(items) do
+		if item.kind == "section_heading" then
+			vim.api.nvim_buf_add_highlight(buf, ns, "ChunkSection", row - 1, 0, -1)
+		else
+			local file = item.file
+			if item.file_index == selected_index then
+				vim.api.nvim_buf_add_highlight(buf, ns, "ChunkFileSelected", row - 1, 0, -1)
+			end
 
-		vim.api.nvim_buf_add_highlight(buf, ns, file_status(file.status).highlight, index - 1, 1, 2)
+			vim.api.nvim_buf_add_highlight(buf, ns, file_status(file.status).highlight, row - 1, 1, 2)
+		end
 	end
 end
 
-function M.render_files(buf, files, selected_index)
-	render_readonly_buffer(buf, file_panel_lines(files), function()
-		apply_file_highlights(buf, files, selected_index)
+function M.render_files(buf, items, selected_index)
+	render_readonly_buffer(buf, file_panel_lines(items), function()
+		apply_file_highlights(buf, items, selected_index)
 	end)
 end
 

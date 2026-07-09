@@ -3,9 +3,9 @@
 Inline Git diff review for Neovim.
 
 `chunk` opens a readonly unified diff buffer with a changed-files sidebar in a
-dedicated tab. It compares `HEAD` against the working tree, includes untracked
-files, and keeps metadata for each rendered line so future features can open
-and edit real files safely.
+dedicated tab. It shows unstaged and staged changes separately, includes
+untracked files under `Changes`, and can move tracked text hunks between the
+working tree and Git index without modifying the working file.
 
 ## Requirements
 
@@ -32,6 +32,8 @@ With lazy.nvim from this local checkout:
 - `<CR>` opens the real file at the diff line.
 - `<CR>` in the files sidebar selects a changed file and shows its diff.
 - `R` refreshes.
+- `s` stages the tracked text hunk under the cursor from `Changes`.
+- `u` unstages the tracked text hunk under the cursor from `Staged Changes`.
 - `]h` and `[h` jump between hunks.
 - `]f` and `[f` jump between files.
 - `q` closes the Chunk tab.
@@ -51,6 +53,8 @@ require("chunk").setup({
     open_file = "<CR>",
     select_file = "<CR>",
     refresh = "R",
+    stage_hunk = "s",
+    unstage_hunk = "u",
     next_hunk = "]h",
     prev_hunk = "[h",
     next_file = "]f",
@@ -60,8 +64,13 @@ require("chunk").setup({
 })
 ```
 
+Set either mapping to `false` or an empty string to disable it. Staging and
+unstaging operate on the index only and refresh the view after Git accepts the
+patch. Untracked files and binary changes are displayed but do not support
+hunk actions.
+
 ## Current Scope
 
-This MVP intentionally renders diffs as readonly text. Direct editing and LSP
-inside the diff view are future work; the parser already records file path and
-line metadata to support that direction.
+The diff remains readonly: direct editing, LSP support, file-level actions,
+visual-range staging, and discard/reset operations are outside the current
+scope.

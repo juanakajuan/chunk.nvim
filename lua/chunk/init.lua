@@ -54,43 +54,82 @@ local function file_path_for_line(line)
 	return line.new_path or line.old_path
 end
 
-local function build_file_items(rendered)
-	local files = {}
+local function append_file_to_model(model, line)
+	local file = line.file
+	local file_item = {
+		path = file_path_for_line(line) or "(unknown)",
+		section = line.section,
+		status = file and file.status or "modified",
+		is_binary = file and file.is_binary or false,
+		start_line = #model.lines,
+		file = file,
+	}
 
-	for line_number, line in ipairs(rendered) do
-		if line.kind == "file_header" then
-			local file = line.file
-			table.insert(files, {
-				path = file_path_for_line(line) or "(unknown)",
-				status = file and file.status or "modified",
-				is_binary = file and file.is_binary or false,
-				start_line = line_number,
-				file = file,
-			})
-		end
-	end
-
-	return files
+	table.insert(model.file_items, file_item)
+	table.insert(model.panel_items, {
+		kind = "file",
+		section = line.section,
+		file_index = #model.file_items,
+		file = file_item,
+	})
+	file_item.panel_row = #model.panel_items
 end
 
-local function render_model_for_diff(diff)
-	if diff == "" then
-		return {
-			lines = {
-				{
-					kind = "empty",
-					text = "No changes against HEAD",
-				},
+local function append_section_to_model(model, section)
+	local lines = parser.flatten(parser.parse(section.diff, {
+		section = section.id,
+	}))
+	if #lines == 0 then
+		return
+	end
+
+	if #model.lines > 0 then
+		table.insert(model.lines, {
+			kind = "blank",
+			text = "",
+		})
+	end
+
+	table.insert(model.lines, {
+		kind = "section_heading",
+		text = section.title,
+		section = section.id,
+	})
+	table.insert(model.panel_items, {
+		kind = "section_heading",
+		text = section.title,
+		section = section.id,
+	})
+
+	for _, line in ipairs(lines) do
+		table.insert(model.lines, line)
+		if line.kind == "file_header" then
+			append_file_to_model(model, line)
+		end
+	end
+end
+
+local function render_model_for_changes(collected)
+	local model = {
+		lines = {},
+		file_items = {},
+		panel_items = {},
+	}
+
+	for _, section in ipairs(collected.sections or {}) do
+		append_section_to_model(model, section)
+	end
+
+	if #model.lines == 0 then
+		model.lines = {
+			{
+				kind = "empty",
+				text = "No staged or unstaged changes",
 			},
-			files = {},
 		}
 	end
 
-	local rendered = parser.flatten(parser.parse(diff))
-	return {
-		lines = rendered,
-		files = build_file_items(rendered),
-	}
+	return model
 end
 
 local function collect_diff(start_dir)
@@ -145,13 +184,14 @@ local function render_files_panel(state)
 		return
 	end
 
-	render.render_files(state.files_buf, state.file_items, state.selected_file_index)
+	render.render_files(state.files_buf, state.panel_items, state.selected_file_index)
 	set_buffer_state(state.files_buf, state)
 end
 
 local function render_model_into_view(state, model)
 	state.line_map = model.lines
-	state.file_items = model.files
+	state.file_items = model.file_items
+	state.panel_items = model.panel_items
 
 	if valid_buf(state.diff_buf) then
 		render.render(state.diff_buf, model.lines)
@@ -175,31 +215,46 @@ local function file_index_for_diff_line(state, row)
 	return current
 end
 
-local function file_index_for_path(state, path)
-	if not path then
+local function file_identity(file)
+	if not file then
+		return nil
+	end
+
+	return {
+		section = file.section,
+		path = file.path,
+	}
+end
+
+local function file_index_for_identity(state, identity)
+	if not identity then
 		return nil
 	end
 
 	for index, file in ipairs(state.file_items) do
-		if file.path == path then
+		if file.section == identity.section and file.path == identity.path then
 			return index
 		end
 	end
+end
+
+local function file_index_at_panel_row(state, row)
+	local item = row and state.panel_items[row] or nil
+	return item and item.kind == "file" and item.file_index or nil
 end
 
 local function set_selected_file(state, index)
 	local file = index and state.file_items[index] or nil
 
 	state.selected_file_index = file and index or nil
-	state.selected_file_path = file and file.path or nil
+	state.selected_file_identity = file_identity(file)
 
 	return file
 end
 
-local function file_path_at_panel_row(state, row)
-	local file = row and state.file_items[row] or nil
-
-	return file and file.path or state.selected_file_path
+local function file_identity_at_panel_row(state, row)
+	local item = row and state.panel_items[row] or nil
+	return file_identity(item and item.file) or state.selected_file_identity
 end
 
 local function sync_selection_to_diff_cursor(state)
@@ -219,7 +274,7 @@ local function sync_selection_to_diff_cursor(state)
 	render_files_panel(state)
 
 	if index then
-		set_cursor_row(state.files_win, state.files_buf, index)
+		set_cursor_row(state.files_win, state.files_buf, state.file_items[index].panel_row)
 	end
 end
 
@@ -235,7 +290,7 @@ local function select_file(state, index, opts)
 	set_selected_file(state, index)
 	render_files_panel(state)
 
-	set_cursor_row(state.files_win, state.files_buf, index)
+	set_cursor_row(state.files_win, state.files_buf, file.panel_row)
 
 	if valid_win(state.diff_win) and valid_buf(state.diff_buf) then
 		set_cursor_row(state.diff_win, state.diff_buf, file.start_line)
@@ -251,10 +306,13 @@ local function select_file(state, index, opts)
 	end
 end
 
-local function restore_files_panel_selection(state, row, path)
-	local selected = file_index_for_path(state, path)
-	if not selected and row and #state.file_items > 0 then
-		selected = math.min(row, #state.file_items)
+local function restore_files_panel_selection(state, row, identity)
+	local selected = file_index_for_identity(state, identity)
+	if not selected and row and #state.panel_items > 0 then
+		local clamped_row = math.min(row, #state.panel_items)
+		selected = file_index_at_panel_row(state, clamped_row)
+			or file_index_at_panel_row(state, clamped_row + 1)
+			or file_index_at_panel_row(state, clamped_row - 1)
 	end
 
 	if selected then
@@ -278,6 +336,8 @@ local function apply_diff_keymaps(buf)
 
 	set_keymap(buf, maps.open_file, M.open_file_at_cursor, "Open changed file")
 	set_keymap(buf, maps.refresh, M.refresh, "Refresh Chunk diff")
+	set_keymap(buf, maps.stage_hunk, M.stage_hunk, "Stage hunk")
+	set_keymap(buf, maps.unstage_hunk, M.unstage_hunk, "Unstage hunk")
 	set_keymap(buf, maps.next_hunk, function()
 		M.jump("hunk", 1)
 	end, "Next hunk")
@@ -402,6 +462,87 @@ local function nearest_file_target(state, row)
 	return find_file_target(state, row + 1, #state.line_map, 1)
 end
 
+local function selection_identity_for_line(line)
+	if not line or not line.section then
+		return nil
+	end
+
+	local path = file_path_for_line(line)
+	if not path then
+		return nil
+	end
+
+	local identity = {
+		section = line.section,
+		path = path,
+	}
+
+	if line.hunk then
+		identity.hunk = {
+			old_start = line.hunk.old_start,
+			old_count = line.hunk.old_count,
+			new_start = line.hunk.new_start,
+			new_count = line.hunk.new_count,
+		}
+	end
+
+	return identity
+end
+
+local function same_hunk(left, right)
+	return left
+		and right
+		and left.old_start == right.old_start
+		and left.old_count == right.old_count
+		and left.new_start == right.new_start
+		and left.new_count == right.new_count
+end
+
+local function selection_row(state, identity)
+	if not identity then
+		return nil
+	end
+
+	local file_header_row = nil
+	local nearest_hunk_row = nil
+	local nearest_hunk_distance = math.huge
+
+	for row, line in ipairs(state.line_map) do
+		if line.section == identity.section and file_path_for_line(line) == identity.path then
+			if line.kind == "file_header" then
+				file_header_row = row
+			elseif identity.hunk and line.kind == "hunk" and line.hunk then
+				if same_hunk(line.hunk, identity.hunk) then
+					return row
+				end
+
+				local distance = math.abs(line.hunk.old_start - identity.hunk.old_start)
+					+ math.abs(line.hunk.new_start - identity.hunk.new_start)
+				if distance < nearest_hunk_distance then
+					nearest_hunk_row = row
+					nearest_hunk_distance = distance
+				end
+			end
+		end
+	end
+
+	return nearest_hunk_row or file_header_row
+end
+
+local function restore_diff_selection(state, identity, fallback_cursor)
+	if not valid_win(state.diff_win) then
+		return
+	end
+
+	local row = selection_row(state, identity)
+	if not row and fallback_cursor then
+		row = fallback_cursor[1]
+	end
+
+	set_cursor_row(state.diff_win, state.diff_buf, row or 1)
+	sync_selection_to_diff_cursor(state)
+end
+
 local function restore_origin_window(state)
 	local tab = state.origin_tab
 	if not tab or not vim.api.nvim_tabpage_is_valid(tab) then
@@ -494,8 +635,9 @@ function M.open()
 		files_win = view.files_win,
 		line_map = {},
 		file_items = {},
+		panel_items = {},
 		selected_file_index = nil,
-		selected_file_path = nil,
+		selected_file_identity = nil,
 	}
 
 	render.prepare_buffer(state.diff_buf, ("chunk://%s/%d"):format(collected.root, state.diff_buf))
@@ -503,7 +645,7 @@ function M.open()
 		render.prepare_files_buffer(state.files_buf, ("chunk://%s/files/%d"):format(collected.root, state.files_buf))
 	end
 
-	render_model_into_view(state, render_model_for_diff(collected.diff))
+	render_model_into_view(state, render_model_for_changes(collected))
 	if #state.file_items > 0 then
 		select_file(state, 1, {
 			focus_diff = false,
@@ -519,7 +661,8 @@ function M.open()
 	focus_window(state.diff_win)
 end
 
-function M.refresh()
+function M.refresh(opts)
+	opts = type(opts) == "table" and opts or {}
 	local state = current_buffer_state()
 	if not state or not valid_buf(state.diff_buf) then
 		M.open()
@@ -530,8 +673,9 @@ function M.refresh()
 	local current_win = vim.api.nvim_get_current_win()
 	local current_is_files_panel = current_buf == state.files_buf
 	local files_cursor = current_is_files_panel and vim.api.nvim_win_get_cursor(0)[1] or nil
-	local selected_path = current_is_files_panel and file_path_at_panel_row(state, files_cursor) or nil
+	local selected_identity = current_is_files_panel and file_identity_at_panel_row(state, files_cursor) or nil
 	local diff_cursor = valid_win(state.diff_win) and vim.api.nvim_win_get_cursor(state.diff_win) or { 1, 0 }
+	local diff_selection = opts.selection or selection_identity_for_line(state.line_map[diff_cursor[1]])
 	local collected, err = collect_diff(state.root)
 	if not collected then
 		notify(err, vim.log.levels.ERROR)
@@ -539,20 +683,15 @@ function M.refresh()
 	end
 
 	state.root = collected.root
-	render_model_into_view(state, render_model_for_diff(collected.diff))
+	render_model_into_view(state, render_model_for_changes(collected))
 
 	if current_is_files_panel then
-		restore_files_panel_selection(state, files_cursor, selected_path)
+		restore_files_panel_selection(state, files_cursor, selected_identity)
 		focus_window(current_win)
 		return
 	end
 
-	if valid_win(state.diff_win) then
-		local last_line = math.max(1, vim.api.nvim_buf_line_count(state.diff_buf))
-		diff_cursor[1] = math.min(diff_cursor[1], last_line)
-		vim.api.nvim_win_set_cursor(state.diff_win, diff_cursor)
-	end
-	sync_selection_to_diff_cursor(state)
+	restore_diff_selection(state, diff_selection, diff_cursor)
 end
 
 function M.select_file_at_cursor()
@@ -562,7 +701,12 @@ function M.select_file_at_cursor()
 	end
 
 	local row = vim.api.nvim_win_get_cursor(0)[1]
-	select_file(state, row, {
+	local index = file_index_at_panel_row(state, row)
+	if not index then
+		return
+	end
+
+	select_file(state, index, {
 		focus_diff = true,
 	})
 end
@@ -574,7 +718,10 @@ function M.select_relative_file(direction)
 	end
 
 	local current_buf = vim.api.nvim_get_current_buf()
-	local current = current_buf == state.files_buf and vim.api.nvim_win_get_cursor(0)[1] or state.selected_file_index
+	local current = state.selected_file_index
+	if current_buf == state.files_buf then
+		current = file_index_at_panel_row(state, vim.api.nvim_win_get_cursor(0)[1]) or current
+	end
 	if not current and valid_win(state.diff_win) then
 		current = file_index_for_diff_line(state, vim.api.nvim_win_get_cursor(state.diff_win)[1])
 	end
@@ -615,6 +762,67 @@ function M.open_file_at_cursor()
 
 	vim.cmd.edit(vim.fn.fnameescape(full_path))
 	vim.api.nvim_win_set_cursor(0, { math.max(1, line), 0 })
+end
+
+local function apply_hunk_action(action)
+	local state = current_buffer_state()
+	if not state or vim.api.nvim_get_current_buf() ~= state.diff_buf then
+		notify(action.cursor_message, vim.log.levels.WARN)
+		return
+	end
+
+	local row = vim.api.nvim_win_get_cursor(0)[1]
+	local line = state.line_map[row]
+	if not line or not line.hunk or not line.file then
+		notify(action.no_hunk_message, vim.log.levels.WARN)
+		return
+	end
+
+	if line.section ~= action.source_section then
+		notify(action.wrong_section_message, vim.log.levels.WARN)
+		return
+	end
+
+	if action.source_section == "unstaged" and line.file.old_path == nil then
+		notify("Untracked hunks cannot be staged individually; add the file with Git first", vim.log.levels.WARN)
+		return
+	end
+
+	local selection = selection_identity_for_line(line)
+	local ok, err = action.apply(state.root, line.hunk.patch)
+	if not ok then
+		notify(("Could not %s hunk: %s"):format(action.verb, err), vim.log.levels.ERROR)
+		return
+	end
+
+	selection.section = action.target_section
+	M.refresh({
+		selection = selection,
+	})
+end
+
+function M.stage_hunk()
+	apply_hunk_action({
+		verb = "stage",
+		source_section = "unstaged",
+		target_section = "staged",
+		apply = git.stage_hunk,
+		cursor_message = "Place the cursor on an unstaged text hunk to stage it",
+		no_hunk_message = "No text hunk under the cursor; move into a hunk in Changes",
+		wrong_section_message = "This hunk is already staged; use the unstage action instead",
+	})
+end
+
+function M.unstage_hunk()
+	apply_hunk_action({
+		verb = "unstage",
+		source_section = "staged",
+		target_section = "unstaged",
+		apply = git.unstage_hunk,
+		cursor_message = "Place the cursor on a staged text hunk to unstage it",
+		no_hunk_message = "No text hunk under the cursor; move into a hunk in Staged Changes",
+		wrong_section_message = "This hunk is not staged; use the stage action instead",
+	})
 end
 
 function M.jump(kind, direction)
