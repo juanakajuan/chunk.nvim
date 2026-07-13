@@ -13,6 +13,7 @@ local states = setmetatable({}, {
 local augroup = vim.api.nvim_create_augroup("chunk", {
 	clear = false,
 })
+local status_namespace = vim.api.nvim_create_namespace("chunk_status")
 
 local function notify(message, level)
 	vim.notify(message, level or vim.log.levels.INFO, {
@@ -133,13 +134,13 @@ local function render_model_for_changes(collected)
 	return model
 end
 
-local function collect_diff(start_dir, spec)
-	return git.collect({
+local function collect_diff_async(start_dir, spec, callback)
+	return git.collect_async({
 		start_dir = start_dir,
 		context_lines = config.options.context_lines,
 		include_untracked = config.options.include_untracked,
 		spec = spec,
-	})
+	}, callback)
 end
 
 local function set_keymap(buf, lhs, rhs, desc)
@@ -172,8 +173,26 @@ local function clear_buffer_state(buf)
 end
 
 local function clear_view_state(state)
+	if state.request then
+		state.request.cancel()
+		state.request = nil
+	end
+	state.closed = true
 	clear_buffer_state(state.diff_buf)
 	clear_buffer_state(state.files_buf)
+end
+
+local function set_collection_status(state, message)
+	if not valid_buf(state.diff_buf) then
+		return
+	end
+	vim.api.nvim_buf_clear_namespace(state.diff_buf, status_namespace, 0, -1)
+	if message then
+		vim.api.nvim_buf_set_extmark(state.diff_buf, status_namespace, 0, 0, {
+			virt_text = { { message, "Comment" } },
+			virt_text_pos = "right_align",
+		})
+	end
 end
 
 local function set_view_state(state)
@@ -595,6 +614,12 @@ local function apply_autocmds(state)
 				group = augroup,
 				buffer = buf,
 				callback = function(args)
+					local state = states[args.buf]
+					if state and state.request then
+						state.request.cancel()
+						state.request = nil
+						state.closed = true
+					end
 					clear_buffer_state(args.buf)
 				end,
 			})
@@ -615,6 +640,50 @@ local function apply_autocmds(state)
 	end
 end
 
+local function start_collection(state, start_dir, opts)
+	opts = opts or {}
+	if state.request then
+		state.request.cancel()
+	end
+	state.generation = (state.generation or 0) + 1
+	local generation = state.generation
+	set_collection_status(state, opts.initial and nil or "Refreshing…")
+
+	state.request = collect_diff_async(start_dir, state.spec, function(collected, err)
+		vim.schedule(function()
+			if state.closed or state.generation ~= generation or not valid_buf(state.diff_buf) then
+				return
+			end
+			state.request = nil
+			set_collection_status(state, nil)
+			if not collected then
+				if opts.initial then
+					close_view(state)
+				end
+				notify(err, vim.log.levels.ERROR)
+				return
+			end
+
+			state.root = collected.root
+			state.spec = collected.spec
+			state.mutable = collected.mutable
+			render_model_into_view(state, render_model_for_changes(collected))
+			if opts.initial then
+				if #state.file_items > 0 then
+					select_file(state, 1, { focus_diff = false })
+				end
+				return
+			end
+			if opts.current_is_files_panel then
+				restore_files_panel_selection(state, opts.files_cursor, opts.selected_identity)
+				focus_window(opts.current_win)
+				return
+			end
+			restore_diff_selection(state, opts.diff_selection, opts.diff_cursor)
+		end)
+	end)
+end
+
 function M.setup(opts)
 	config.setup(opts)
 end
@@ -628,17 +697,11 @@ function M.open(args)
 
 	local active_state = current_buffer_state()
 	local start_dir = active_state and active_state.root or git.current_start_dir()
-	local collected, err = collect_diff(start_dir, spec)
-	if not collected then
-		notify(err, vim.log.levels.ERROR)
-		return
-	end
-
 	local view = open_diff_view()
 	local state = {
-		root = collected.root,
-		spec = collected.spec,
-		mutable = collected.mutable,
+		root = start_dir,
+		spec = spec,
+		mutable = diff_spec.is_mutable(spec),
 		origin_tab = view.origin_tab,
 		origin_win = view.origin_win,
 		open_mode = config.options.open_mode,
@@ -653,23 +716,22 @@ function M.open(args)
 		selected_file_identity = nil,
 	}
 
-	render.prepare_buffer(state.diff_buf, ("chunk://%s/%d"):format(collected.root, state.diff_buf))
+	render.prepare_buffer(state.diff_buf, ("chunk://loading/%d"):format(state.diff_buf))
 	if valid_buf(state.files_buf) then
-		render.prepare_files_buffer(state.files_buf, ("chunk://%s/files/%d"):format(collected.root, state.files_buf))
+		render.prepare_files_buffer(state.files_buf, ("chunk://loading/files/%d"):format(state.files_buf))
 	end
 
-	render_model_into_view(state, render_model_for_changes(collected))
-	if #state.file_items > 0 then
-		select_file(state, 1, {
-			focus_diff = false,
-		})
-	end
+	render_model_into_view(
+		state,
+		{ lines = { { kind = "empty", text = "Loading Git changes…" } }, file_items = {}, panel_items = {} }
+	)
 
 	apply_diff_keymaps(state.diff_buf, state.mutable)
 	if valid_buf(state.files_buf) then
 		apply_files_keymaps(state.files_buf)
 	end
 	apply_autocmds(state)
+	start_collection(state, start_dir, { initial = true })
 
 	focus_window(state.diff_win)
 end
@@ -689,24 +751,14 @@ function M.refresh(opts)
 	local selected_identity = current_is_files_panel and file_identity_at_panel_row(state, files_cursor) or nil
 	local diff_cursor = valid_win(state.diff_win) and vim.api.nvim_win_get_cursor(state.diff_win) or { 1, 0 }
 	local diff_selection = opts.selection or selection_identity_for_line(state.line_map[diff_cursor[1]])
-	local collected, err = collect_diff(state.root, state.spec)
-	if not collected then
-		notify(err, vim.log.levels.ERROR)
-		return
-	end
-
-	state.root = collected.root
-	state.spec = collected.spec
-	state.mutable = collected.mutable
-	render_model_into_view(state, render_model_for_changes(collected))
-
-	if current_is_files_panel then
-		restore_files_panel_selection(state, files_cursor, selected_identity)
-		focus_window(current_win)
-		return
-	end
-
-	restore_diff_selection(state, diff_selection, diff_cursor)
+	start_collection(state, state.root, {
+		current_is_files_panel = current_is_files_panel,
+		current_win = current_win,
+		files_cursor = files_cursor,
+		selected_identity = selected_identity,
+		diff_cursor = diff_cursor,
+		diff_selection = diff_selection,
+	})
 end
 
 function M.select_file_at_cursor()
@@ -872,6 +924,11 @@ end
 
 function M.close()
 	local state = current_buffer_state()
+	if state and state.request then
+		state.request.cancel()
+		state.request = nil
+		state.closed = true
+	end
 
 	if state and state.open_mode == "tab" and #vim.api.nvim_list_tabpages() > 1 then
 		pcall(vim.cmd.tabclose)
@@ -884,6 +941,11 @@ function M.close()
 	end
 
 	pcall(vim.cmd.bwipeout)
+end
+
+function M.is_collecting()
+	local state = current_buffer_state()
+	return state ~= nil and state.request ~= nil
 end
 
 return M

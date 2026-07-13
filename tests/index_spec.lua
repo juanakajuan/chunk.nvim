@@ -131,6 +131,12 @@ local function open_chunk_view(root, selected_line)
 	})
 	vim.cmd.edit(vim.fn.fnameescape(root .. "/shared.txt"))
 	chunk.open()
+	assert(
+		vim.wait(5000, function()
+			return not chunk.is_collecting()
+		end, 10),
+		"Chunk collection completed"
+	)
 
 	local diff_win = assert(find_diff_window(), "diff window was not opened")
 	local row = assert(find_line(diff_win, selected_line), "selected line was not rendered")
@@ -149,6 +155,12 @@ local function test_stage_and_unstage_hunk_update_only_index_and_follow_selectio
 
 		local diff_win = open_chunk_view(root, "+unstaged line 16")
 		chunk.stage_hunk()
+		assert(
+			vim.wait(5000, function()
+				return not chunk.is_collecting()
+			end, 10),
+			"Chunk refresh completed"
+		)
 
 		assert_equal(read_file(root .. "/shared.txt"), working_before, "staging leaves working file unchanged")
 		local index_after_stage = run({ "git", "show", ":shared.txt" }, root)
@@ -172,6 +184,12 @@ local function test_stage_and_unstage_hunk_update_only_index_and_follow_selectio
 		assert_contains(nearby, "unstaged line 16", "selection follows the staged hunk")
 
 		chunk.unstage_hunk()
+		assert(
+			vim.wait(5000, function()
+				return not chunk.is_collecting()
+			end, 10),
+			"Chunk refresh completed"
+		)
 
 		assert_equal(read_file(root .. "/shared.txt"), working_before, "unstaging leaves working file unchanged")
 		assert_equal(

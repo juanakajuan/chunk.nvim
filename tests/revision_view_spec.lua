@@ -138,6 +138,11 @@ local function capture_notification(fn)
 	end
 
 	local ok, err = xpcall(fn, debug.traceback)
+	if ok then
+		vim.wait(5000, function()
+			return notification ~= nil
+		end, 10)
+	end
 	vim.notify = original_notify
 	if not ok then
 		error(err, 0)
@@ -153,6 +158,12 @@ local function open_revision_view(root, pathspec)
 	})
 	vim.cmd.edit(vim.fn.fnameescape(root .. "/inside/base.lua"))
 	vim.cmd("Chunk main...HEAD -- " .. (pathspec or "inside/"))
+	assert(
+		vim.wait(5000, function()
+			return not chunk.is_collecting()
+		end, 10),
+		"Chunk collection completed"
+	)
 	return find_chunk_windows()
 end
 
@@ -180,6 +191,12 @@ local function test_refresh_preserves_revision_range_and_pathspecs()
 	with_diverging_repo(function(root)
 		local diff_win = open_revision_view(root)
 		chunk.refresh()
+		assert(
+			vim.wait(5000, function()
+				return not chunk.is_collecting()
+			end, 10),
+			"Chunk refresh completed"
+		)
 
 		local diff_lines = window_lines(diff_win)
 		assert_equal(diff_lines[1], "Comparison: main...HEAD -- inside/", "refreshed comparison description")
@@ -278,6 +295,12 @@ local function test_invalid_revision_preserves_existing_chunk_view()
 		})
 		vim.cmd.edit(vim.fn.fnameescape(root .. "/inside/base.lua"))
 		vim.cmd("Chunk")
+		assert(
+			vim.wait(5000, function()
+				return not chunk.is_collecting()
+			end, 10),
+			"Chunk collection completed"
+		)
 		local diff_win = assert(find_chunk_windows(), "working-tree diff window exists")
 		local diff_buf = vim.api.nvim_win_get_buf(diff_win)
 		local rendered_before = table.concat(window_lines(diff_win), "\n")

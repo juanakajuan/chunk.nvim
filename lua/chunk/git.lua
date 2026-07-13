@@ -2,6 +2,45 @@ local diff_spec = require("chunk.diff_spec")
 
 local M = {}
 
+local function default_system(argv, opts, callback)
+	local process = vim.system(argv, {
+		cwd = opts.cwd,
+		stdin = opts.stdin,
+		text = true,
+	}, callback)
+
+	return function()
+		pcall(process.kill, process, 15)
+	end
+end
+
+local function default_read_file(path, callback)
+	vim.uv.fs_open(path, "r", 438, function(open_err, fd)
+		if open_err then
+			callback(nil, open_err)
+			return
+		end
+
+		vim.uv.fs_fstat(fd, function(stat_err, stat)
+			if stat_err then
+				vim.uv.fs_close(fd)
+				callback(nil, stat_err)
+				return
+			end
+
+			vim.uv.fs_read(fd, stat.size, 0, function(read_err, data)
+				vim.uv.fs_close(fd)
+				callback(read_err and nil or (data or ""), read_err)
+			end)
+		end)
+	end)
+end
+
+local default_runner = {
+	system = default_system,
+	read_file = default_read_file,
+}
+
 local function failure_message(result)
 	for _, output in ipairs({ result.stderr or "", result.stdout or "" }) do
 		if output ~= "" then
@@ -296,6 +335,177 @@ function M.collect(opts)
 		},
 	}
 	return collected, nil
+end
+
+---Collect repository changes without blocking Neovim.
+---@param opts table
+---@param callback fun(collected: table|nil, err: string|nil)
+---@return table handle A handle with a cancellable `cancel()` method.
+function M.collect_async(opts, callback)
+	opts = opts or {}
+	local runner = opts.runner or default_runner
+	local cancelled = false
+	local completed = false
+	local cancellations = {}
+
+	local function finish(collected, err)
+		if cancelled or completed then
+			return
+		end
+		completed = true
+		callback(collected, err)
+	end
+
+	local function system(argv, system_opts, done)
+		if cancelled then
+			return
+		end
+		local cancel = runner.system(argv, system_opts or {}, function(result)
+			if cancelled then
+				return
+			end
+			if result.code ~= 0 then
+				done(nil, failure_message(result))
+				return
+			end
+			done(result.stdout or "", nil)
+		end)
+		if type(cancel) == "function" then
+			table.insert(cancellations, cancel)
+		elseif type(cancel) == "table" and type(cancel.cancel) == "function" then
+			table.insert(cancellations, function()
+				cancel:cancel()
+			end)
+		end
+	end
+
+	local function git(root, argv, done)
+		system(vim.list_extend({ "git", "-C", root }, vim.deepcopy(argv)), {}, done)
+	end
+
+	local spec = opts.spec or { mode = "working_tree", pathspecs = {} }
+	local context_lines = opts.context_lines or 3
+	local start_dir = opts.start_dir or M.current_start_dir()
+
+	local function assemble(root, unstaged, staged)
+		local description = diff_spec.describe(spec)
+		local changes_title = "Changes"
+		local staged_title = "Staged Changes"
+		local empty_message = "No staged or unstaged changes"
+		if #spec.pathspecs > 0 then
+			changes_title = changes_title .. ": " .. description
+			staged_title = staged_title .. ": " .. description
+			empty_message = empty_message .. " for " .. description
+		end
+		finish({
+			root = root,
+			spec = spec,
+			description = description,
+			mutable = diff_spec.is_mutable(spec),
+			empty_message = empty_message,
+			sections = {
+				{ id = "unstaged", title = changes_title, diff = unstaged },
+				{ id = "staged", title = staged_title, diff = staged },
+			},
+		}, nil)
+	end
+
+	local function collect_untracked(root, done)
+		local argv = { "ls-files", "--others", "--exclude-standard", "-z", "--" }
+		vim.list_extend(argv, spec.pathspecs or {})
+		git(root, argv, function(out, err)
+			if not out then
+				done(nil, err)
+				return
+			end
+			local files = {}
+			for path in out:gmatch("([^%z]+)%z") do
+				table.insert(files, path)
+			end
+			table.sort(files)
+			if #files == 0 then
+				done("", nil)
+				return
+			end
+
+			local remaining = #files
+			local chunks = {}
+			for index, path in ipairs(files) do
+				runner.read_file(root .. "/" .. path, function(data)
+					if cancelled then
+						return
+					end
+					chunks[index] = data and M.synthesize_untracked_diff(path, data) or binary_untracked_diff(path)
+					remaining = remaining - 1
+					if remaining == 0 then
+						done(table.concat(chunks, ""), nil)
+					end
+				end)
+			end
+		end)
+	end
+
+	git(start_dir, { "rev-parse", "--show-toplevel" }, function(root_out, root_err)
+		if not root_out then
+			finish(nil, root_err)
+			return
+		end
+		local root = vim.trim(root_out)
+		if spec.mode == "revision" then
+			git(root, M.diff_argv(spec, context_lines, false), function(comparison, comparison_err)
+				if not comparison then
+					finish(nil, ("Git rejected revision or range %q: %s"):format(spec.revision, comparison_err))
+					return
+				end
+				local description = diff_spec.describe(spec)
+				finish({
+					root = root,
+					spec = spec,
+					description = description,
+					mutable = diff_spec.is_mutable(spec),
+					empty_message = "No changes for " .. description,
+					sections = { { id = "comparison", title = "Comparison: " .. description, diff = comparison } },
+				}, nil)
+			end)
+			return
+		end
+
+		git(root, M.diff_argv(spec, context_lines, false), function(unstaged, unstaged_err)
+			if not unstaged then
+				finish(nil, unstaged_err)
+				return
+			end
+			git(root, M.diff_argv(spec, context_lines, true), function(staged, staged_err)
+				if not staged then
+					finish(nil, staged_err)
+					return
+				end
+				if opts.include_untracked == false then
+					assemble(root, unstaged, staged)
+					return
+				end
+				collect_untracked(root, function(untracked, untracked_err)
+					if not untracked then
+						finish(nil, untracked_err)
+						return
+					end
+					assemble(root, unstaged .. untracked, staged)
+				end)
+			end)
+		end)
+	end)
+
+	return {
+		cancel = function()
+			if cancelled or completed then
+				return
+			end
+			cancelled = true
+			for _, cancel in ipairs(cancellations) do
+				pcall(cancel)
+			end
+		end,
+	}
 end
 
 local function apply_cached_patch(root, patch, reverse)

@@ -136,6 +136,12 @@ local function open_chunk(root, filename, options)
 	chunk.setup(vim.tbl_extend("force", { open_mode = "tab" }, options or {}))
 	vim.cmd.edit(vim.fn.fnameescape(root .. "/" .. filename))
 	chunk.open()
+	assert(
+		vim.wait(5000, function()
+			return not chunk.is_collecting()
+		end, 10),
+		"Chunk collection completed"
+	)
 
 	return find_chunk_windows()
 end
