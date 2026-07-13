@@ -1,6 +1,7 @@
 local M = {}
 
 local namespace = vim.api.nvim_create_namespace("chunk_source")
+local render = require("chunk.render")
 
 local function text(lines)
 	if #lines == 0 then
@@ -52,6 +53,7 @@ local function decorate(view)
 	if view.closed or not vim.api.nvim_buf_is_valid(view.buf) then
 		return
 	end
+	render.set_highlights()
 
 	local current = vim.api.nvim_buf_get_lines(view.buf, 0, -1, false)
 	local changes = vim.diff(text(view.baseline), text(current), { result_type = "indices" })
@@ -61,7 +63,7 @@ local function decorate(view)
 		local old_start, old_count, new_start, new_count = unpack(change)
 		for row = new_start, new_start + new_count - 1 do
 			vim.api.nvim_buf_set_extmark(view.buf, namespace, row - 1, 0, {
-				line_hl_group = old_count == 0 and "DiffAdd" or "DiffChange",
+				line_hl_group = "ChunkAdd",
 				hl_eol = true,
 			})
 		end
@@ -69,7 +71,7 @@ local function decorate(view)
 		if old_count > 0 then
 			local deleted = {}
 			for row = old_start, old_start + old_count - 1 do
-				table.insert(deleted, { { view.baseline[row], "DiffDelete" } })
+				table.insert(deleted, { { view.baseline[row], "ChunkDelete" } })
 			end
 			local line_count = vim.api.nvim_buf_line_count(view.buf)
 			local anchor = math.min(math.max(new_start - 1, 0), math.max(line_count - 1, 0))

@@ -5,12 +5,15 @@ local ns = vim.api.nvim_create_namespace("chunk")
 local highlights = {
 	ChunkFile = "Directory",
 	ChunkHunk = "Title",
-	ChunkAdd = "DiffAdd",
-	ChunkDelete = "DiffDelete",
 	ChunkMeta = "Comment",
 	ChunkBinary = "WarningMsg",
 	ChunkSection = "Title",
 	ChunkFileSelected = "Visual",
+}
+
+local diff_highlights = {
+	ChunkAdd = { bg = "#26331D" },
+	ChunkDelete = { bg = "#3A2122" },
 }
 
 local line_highlights = {
@@ -41,12 +44,16 @@ local file_statuses = {
 	},
 }
 
-local function set_highlights()
+function M.set_highlights()
 	for group, target in pairs(highlights) do
 		vim.api.nvim_set_hl(0, group, {
 			link = target,
 			default = true,
 		})
+	end
+	for group, highlight in pairs(diff_highlights) do
+		highlight.default = true
+		vim.api.nvim_set_hl(0, group, highlight)
 	end
 end
 
@@ -83,7 +90,7 @@ local function file_panel_lines(items)
 end
 
 local function render_readonly_buffer(buf, lines, apply_buffer_highlights)
-	set_highlights()
+	M.set_highlights()
 
 	vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
 	vim.api.nvim_set_option_value("readonly", false, { buf = buf })
