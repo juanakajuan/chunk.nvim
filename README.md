@@ -7,8 +7,9 @@ dedicated tab. It shows unstaged and staged changes separately, includes
 untracked files under `Changes`, and can move tracked text hunks between the
 working tree and Git index without modifying the working file.
 
-An opt-in source-backed mode displays a selected modified tracked file in its
-real buffer, with working-tree changes decorated inline against `HEAD`.
+An opt-in source-backed mode displays a selected modified or untracked file in
+its real buffer, with working-tree changes decorated inline against `HEAD` or
+an empty baseline.
 
 ## Requirements
 
@@ -108,17 +109,16 @@ folder to collapse or expand it. The icons are designed for a Nerd Font.
 
 ## Source-backed mode
 
-Set `source_view.enabled = true` to make a selected existing, tracked, modified
-text file replace the unified pane with its canonical source buffer. Added and
-changed lines use diff highlights; deleted `HEAD` lines are readonly virtual
-lines. Unsaved edits participate in the comparison, and normal filetype,
-Tree-sitter, diagnostics, LSP, editing, and `:write` behavior are preserved.
+Set `source_view.enabled = true` to make a selected modified or untracked text
+file replace the unified pane with its canonical source buffer. Added and changed
+lines use diff highlights; deleted `HEAD` lines are readonly virtual lines.
+Unsaved edits participate in the comparison, and normal filetype, Tree-sitter,
+diagnostics, LSP, editing, and `:write` behavior are preserved.
 Set `fold_unchanged = true` to fold unchanged regions in the Chunk window while
 keeping `context_lines` visible around each change. These folds are window-local
 and do not affect another window displaying the same source buffer.
 
-This mode currently supports one unstaged modified file at a time in the
-default `HEAD` to working-tree comparison. Added, deleted, renamed, untracked,
-binary, staged-only, revision/range, and multi-file source views remain in the
-readonly unified mode. Hunk staging actions are only available in that unified
-view.
+This mode currently supports one unstaged modified or untracked text file at a
+time in the default working-tree comparison. Deleted, renamed, binary,
+staged-only, revision/range, and multi-file source views remain in the readonly
+unified mode. Hunk staging actions are only available in that unified view.

@@ -337,10 +337,15 @@ local function select_file(state, index, opts)
 	local supported = source_enabled
 		and state.spec.mode == "working_tree"
 		and file.section == "unstaged"
-		and file.status == "modified"
+		and (file.status == "modified" or file.status == "added")
 		and not file.is_binary
 	if supported and valid_win(state.diff_win) then
-		local baseline, baseline_err = git.head_lines(state.root, file.path)
+		local baseline, baseline_err
+		if file.status == "added" then
+			baseline = {}
+		else
+			baseline, baseline_err = git.head_lines(state.root, file.path)
+		end
 		if baseline then
 			state.source = source_view.open({
 				win = state.diff_win,
