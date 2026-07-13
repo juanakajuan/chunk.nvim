@@ -3,6 +3,7 @@ local diff_spec = require("chunk.diff_spec")
 local git = require("chunk.git")
 local parser = require("chunk.parser")
 local render = require("chunk.render")
+local source_view = require("chunk.source_view")
 
 local M = {}
 
@@ -178,6 +179,11 @@ local function clear_view_state(state)
 		state.request = nil
 	end
 	state.closed = true
+	if state.source then
+		source_view.close(state.source)
+		clear_buffer_state(state.source.buf)
+		state.source = nil
+	end
 	clear_buffer_state(state.diff_buf)
 	clear_buffer_state(state.files_buf)
 end
@@ -214,8 +220,9 @@ local function render_model_into_view(state, model)
 	state.file_items = model.file_items
 	state.panel_items = model.panel_items
 
-	if valid_buf(state.diff_buf) then
-		render.render(state.diff_buf, model.lines)
+	local render_buf = state.unified_buf or state.diff_buf
+	if valid_buf(render_buf) then
+		render.render(render_buf, model.lines)
 	end
 
 	render_files_panel(state)
@@ -312,6 +319,47 @@ local function select_file(state, index, opts)
 	render_files_panel(state)
 
 	set_cursor_row(state.files_win, state.files_buf, file.panel_row)
+
+	local source_config = config.options.source_view
+	local source_enabled = type(source_config) == "table" and source_config.enabled == true
+	local supported = source_enabled
+		and state.spec.mode == "working_tree"
+		and file.section == "unstaged"
+		and file.status == "modified"
+		and not file.is_binary
+	if supported and valid_win(state.diff_win) then
+		local baseline, baseline_err = git.head_lines(state.root, file.path)
+		if baseline then
+			if state.source then
+				source_view.close(state.source)
+				clear_buffer_state(state.source.buf)
+			end
+			state.source = source_view.open({
+				win = state.diff_win,
+				path = state.root .. "/" .. file.path,
+				baseline = baseline,
+				debounce_ms = math.max(0, tonumber(source_config.debounce_ms) or 120),
+				fold_unchanged = source_config.fold_unchanged,
+				context_lines = source_config.context_lines,
+				on_write = function()
+					if not state.closed then
+						M.refresh()
+					end
+				end,
+			})
+			state.diff_buf = state.source.buf
+			set_buffer_state(state.diff_buf, state)
+		else
+			notify("Could not open source-backed diff: " .. baseline_err, vim.log.levels.WARN)
+		end
+	elseif state.source and valid_buf(state.unified_buf) then
+		source_view.close(state.source)
+		clear_buffer_state(state.source.buf)
+		state.source = nil
+		state.diff_buf = state.unified_buf
+		vim.api.nvim_win_set_buf(state.diff_win, state.unified_buf)
+		set_buffer_state(state.diff_buf, state)
+	end
 
 	if valid_win(state.diff_win) and valid_buf(state.diff_buf) then
 		set_cursor_row(state.diff_win, state.diff_buf, file.start_line)
@@ -595,10 +643,19 @@ local function delete_buffer(buf)
 end
 
 local function close_view(state)
+	local source_buf = state.source and state.source.buf or nil
+	if state.source then
+		source_view.close(state.source)
+		state.source = nil
+	end
 	close_window(state.files_win)
 	close_window(state.diff_win)
 	delete_buffer(state.files_buf)
-	delete_buffer(state.diff_buf)
+	if state.unified_buf then
+		delete_buffer(state.unified_buf)
+	elseif state.diff_buf ~= source_buf then
+		delete_buffer(state.diff_buf)
+	end
 
 	if state.open_mode ~= "current" then
 		restore_origin_window(state)
@@ -706,6 +763,7 @@ function M.open(args)
 		origin_win = view.origin_win,
 		open_mode = config.options.open_mode,
 		diff_buf = view.diff_buf,
+		unified_buf = view.diff_buf,
 		diff_win = view.diff_win,
 		files_buf = view.files_buf,
 		files_win = view.files_win,
@@ -717,6 +775,9 @@ function M.open(args)
 	}
 
 	render.prepare_buffer(state.diff_buf, ("chunk://loading/%d"):format(state.diff_buf))
+	if type(config.options.source_view) == "table" and config.options.source_view.enabled == true then
+		vim.api.nvim_set_option_value("bufhidden", "hide", { buf = state.diff_buf })
+	end
 	if valid_buf(state.files_buf) then
 		render.prepare_files_buffer(state.files_buf, ("chunk://loading/files/%d"):format(state.files_buf))
 	end
@@ -931,6 +992,13 @@ function M.close()
 	end
 
 	if state and state.open_mode == "tab" and #vim.api.nvim_list_tabpages() > 1 then
+		if state.source then
+			source_view.close(state.source)
+			clear_buffer_state(state.source.buf)
+			state.source = nil
+		end
+		clear_buffer_state(state.unified_buf)
+		delete_buffer(state.unified_buf)
 		pcall(vim.cmd.tabclose)
 		return
 	end

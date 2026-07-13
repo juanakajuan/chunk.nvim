@@ -95,6 +95,21 @@ function M.current_start_dir()
 	return vim.fn.getcwd()
 end
 
+function M.head_lines(root, path)
+	local data, err = run_git(root, { "show", "HEAD:" .. path })
+	if not data then
+		return nil, err
+	end
+	if data:find("\0", 1, true) then
+		return nil, "binary baseline"
+	end
+	local lines = vim.split(data, "\n", { plain = true })
+	if data:sub(-1) == "\n" then
+		table.remove(lines)
+	end
+	return lines, nil
+end
+
 function M.diff_argv(spec, context_lines, cached)
 	local argv = {
 		"diff",

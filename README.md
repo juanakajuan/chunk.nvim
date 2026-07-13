@@ -7,6 +7,9 @@ dedicated tab. It shows unstaged and staged changes separately, includes
 untracked files under `Changes`, and can move tracked text hunks between the
 working tree and Git index without modifying the working file.
 
+An opt-in source-backed mode displays a selected modified tracked file in its
+real buffer, with working-tree changes decorated inline against `HEAD`.
+
 ## Requirements
 
 - Neovim 0.12.x
@@ -68,6 +71,12 @@ require("chunk").setup({
   context_lines = 3,
   include_untracked = true,
   open_mode = "tab",
+  source_view = {
+    enabled = false,
+    debounce_ms = 120,
+    fold_unchanged = false,
+    context_lines = 3,
+  },
   files_panel = {
     enabled = true,
     width = 30,
@@ -92,8 +101,19 @@ unstaging operate on the index only and refresh the view after Git accepts the
 patch. Untracked files and binary changes are displayed but do not support
 hunk actions.
 
-## Current Scope
+## Source-backed mode
 
-The diff remains readonly: direct editing, LSP support, file-level actions,
-visual-range staging, and discard/reset operations are outside the current
-scope.
+Set `source_view.enabled = true` to make a selected existing, tracked, modified
+text file replace the unified pane with its canonical source buffer. Added and
+changed lines use diff highlights; deleted `HEAD` lines are readonly virtual
+lines. Unsaved edits participate in the comparison, and normal filetype,
+Tree-sitter, diagnostics, LSP, editing, and `:write` behavior are preserved.
+Set `fold_unchanged = true` to fold unchanged regions in the Chunk window while
+keeping `context_lines` visible around each change. These folds are window-local
+and do not affect another window displaying the same source buffer.
+
+This mode currently supports one unstaged modified file at a time in the
+default `HEAD` to working-tree comparison. Added, deleted, renamed, untracked,
+binary, staged-only, revision/range, and multi-file source views remain in the
+readonly unified mode. Hunk staging actions are only available in that unified
+view.

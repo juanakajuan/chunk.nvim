@@ -4,6 +4,12 @@ M.defaults = {
 	context_lines = 3,
 	include_untracked = true,
 	open_mode = "tab",
+	source_view = {
+		enabled = false,
+		debounce_ms = 120,
+		fold_unchanged = false,
+		context_lines = 3,
+	},
 	files_panel = {
 		enabled = true,
 		width = 30,
