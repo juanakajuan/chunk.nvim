@@ -6,9 +6,9 @@ package.path = table.concat({
 
 local git = require("chunk.git")
 local pending = {}
-local original_collect_async = git.collect_async
+local original_collect = git.collect
 
-git.collect_async = function(opts, callback)
+git.collect = function(opts, callback)
 	local request = { opts = opts, callback = callback, cancelled = false }
 	table.insert(pending, request)
 	return {
@@ -99,5 +99,5 @@ assert(closing.cancelled, "closing cancels collection")
 closing.callback(collected("too late"))
 vim.wait(20)
 
-git.collect_async = original_collect_async
+git.collect = original_collect
 print("ok 1 test")

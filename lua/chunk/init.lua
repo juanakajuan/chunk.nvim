@@ -144,8 +144,8 @@ local function render_model_for_changes(collected)
 	return model
 end
 
-local function collect_diff_async(start_dir, spec, callback)
-	return git.collect_async({
+local function collect_changes(start_dir, spec, callback)
+	return git.collect({
 		start_dir = start_dir,
 		context_lines = config.options.context_lines,
 		include_untracked = config.options.include_untracked,
@@ -714,7 +714,7 @@ local function start_collection(state, start_dir, opts)
 	local generation = state.generation
 	set_collection_status(state, opts.initial and nil or "Refreshing…")
 
-	state.request = collect_diff_async(start_dir, state.spec, function(collected, err)
+	state.request = collect_changes(start_dir, state.spec, function(collected, err)
 		vim.schedule(function()
 			if state.closed or state.generation ~= generation or not valid_buf(state.diff_buf) then
 				return

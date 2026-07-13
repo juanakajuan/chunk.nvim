@@ -36,7 +36,7 @@ local function default_read_file(path, callback)
 	end)
 end
 
-local default_runner = {
+local default_adapter = {
 	system = default_system,
 	read_file = default_read_file,
 }
@@ -131,48 +131,6 @@ function M.diff_argv(spec, context_lines, cached)
 	return argv
 end
 
-local function tracked_diff(root, context_lines, spec, cached)
-	local argv = M.diff_argv(spec, context_lines, cached)
-	return run_git(root, argv)
-end
-
-local function list_untracked(root, pathspecs)
-	local argv = {
-		"ls-files",
-		"--others",
-		"--exclude-standard",
-		"-z",
-		"--",
-	}
-	vim.list_extend(argv, pathspecs or {})
-
-	local out, err = run_git(root, argv)
-
-	if not out then
-		return nil, err
-	end
-
-	local files = {}
-	for path in out:gmatch("([^%z]+)%z") do
-		table.insert(files, path)
-	end
-
-	table.sort(files)
-	return files, nil
-end
-
-local function read_file(path)
-	local file, err = io.open(path, "rb")
-	if not file then
-		return nil, err
-	end
-
-	local data = file:read("*a")
-	file:close()
-
-	return data or "", nil
-end
-
 local function is_binary(data)
 	return data:find("\0", 1, true) ~= nil
 end
@@ -241,85 +199,25 @@ function M.synthesize_untracked_diff(path, data)
 	return text_untracked_diff(path, data)
 end
 
-local function synthesize_untracked_file(root, path)
-	local data = read_file(root .. "/" .. path)
-	if not data then
-		return binary_untracked_diff(path)
-	end
-
-	return M.synthesize_untracked_diff(path, data)
-end
-
-local function collect_untracked_diffs(root, pathspecs)
-	local files, err = list_untracked(root, pathspecs)
-	if not files then
-		return nil, err
-	end
-
-	local chunks = {}
-	for _, path in ipairs(files) do
-		table.insert(chunks, synthesize_untracked_file(root, path))
-	end
-
-	return table.concat(chunks, ""), nil
-end
-
-function M.collect(opts)
-	opts = opts or {}
-	local spec = opts.spec or {
-		mode = "working_tree",
-		pathspecs = {},
-	}
-
-	local root, root_err = M.repo_root(opts.start_dir or M.current_start_dir())
-	if not root then
-		return nil, root_err
-	end
-
-	local context_lines = opts.context_lines or 3
-	if spec.mode == "revision" then
-		local comparison, comparison_err = tracked_diff(root, context_lines, spec, false)
-		if not comparison then
-			return nil, ("Git rejected revision or range %q: %s"):format(spec.revision, comparison_err)
-		end
-
-		local description = diff_spec.describe(spec)
-		local collected = {
-			root = root,
-			spec = spec,
-			description = description,
-			mutable = diff_spec.is_mutable(spec),
-			empty_message = "No changes for " .. description,
-			sections = {
-				{
-					id = "comparison",
-					title = "Comparison: " .. description,
-					diff = comparison,
-				},
+local function revision_collection(root, spec, comparison)
+	local description = diff_spec.describe(spec)
+	return {
+		root = root,
+		spec = spec,
+		description = description,
+		mutable = diff_spec.is_mutable(spec),
+		empty_message = "No changes for " .. description,
+		sections = {
+			{
+				id = "comparison",
+				title = "Comparison: " .. description,
+				diff = comparison,
 			},
-		}
-		return collected, nil
-	end
+		},
+	}
+end
 
-	local unstaged, unstaged_err = tracked_diff(root, context_lines, spec, false)
-	if not unstaged then
-		return nil, unstaged_err
-	end
-
-	local staged, staged_err = tracked_diff(root, context_lines, spec, true)
-	if not staged then
-		return nil, staged_err
-	end
-
-	if opts.include_untracked ~= false then
-		local untracked, untracked_err = collect_untracked_diffs(root, spec.pathspecs)
-		if not untracked then
-			return nil, untracked_err
-		end
-
-		unstaged = unstaged .. untracked
-	end
-
+local function working_tree_collection(root, spec, unstaged, staged)
 	local description = diff_spec.describe(spec)
 	local changes_title = "Changes"
 	local staged_title = "Staged Changes"
@@ -330,35 +228,26 @@ function M.collect(opts)
 		empty_message = empty_message .. " for " .. description
 	end
 
-	local collected = {
+	return {
 		root = root,
 		spec = spec,
 		description = description,
 		mutable = diff_spec.is_mutable(spec),
 		empty_message = empty_message,
 		sections = {
-			{
-				id = "unstaged",
-				title = changes_title,
-				diff = unstaged,
-			},
-			{
-				id = "staged",
-				title = staged_title,
-				diff = staged,
-			},
+			{ id = "unstaged", title = changes_title, diff = unstaged },
+			{ id = "staged", title = staged_title, diff = staged },
 		},
 	}
-	return collected, nil
 end
 
 ---Collect repository changes without blocking Neovim.
 ---@param opts table
 ---@param callback fun(collected: table|nil, err: string|nil)
 ---@return table handle A handle with a cancellable `cancel()` method.
-function M.collect_async(opts, callback)
+function M.collect(opts, callback)
 	opts = opts or {}
-	local runner = opts.runner or default_runner
+	local adapter = opts.adapter or default_adapter
 	local cancelled = false
 	local completed = false
 	local cancellations = {}
@@ -375,7 +264,7 @@ function M.collect_async(opts, callback)
 		if cancelled then
 			return
 		end
-		local cancel = runner.system(argv, system_opts or {}, function(result)
+		local cancel = adapter.system(argv, system_opts or {}, function(result)
 			if cancelled then
 				return
 			end
@@ -403,26 +292,7 @@ function M.collect_async(opts, callback)
 	local start_dir = opts.start_dir or M.current_start_dir()
 
 	local function assemble(root, unstaged, staged)
-		local description = diff_spec.describe(spec)
-		local changes_title = "Changes"
-		local staged_title = "Staged Changes"
-		local empty_message = "No staged or unstaged changes"
-		if #spec.pathspecs > 0 then
-			changes_title = changes_title .. ": " .. description
-			staged_title = staged_title .. ": " .. description
-			empty_message = empty_message .. " for " .. description
-		end
-		finish({
-			root = root,
-			spec = spec,
-			description = description,
-			mutable = diff_spec.is_mutable(spec),
-			empty_message = empty_message,
-			sections = {
-				{ id = "unstaged", title = changes_title, diff = unstaged },
-				{ id = "staged", title = staged_title, diff = staged },
-			},
-		}, nil)
+		finish(working_tree_collection(root, spec, unstaged, staged), nil)
 	end
 
 	local function collect_untracked(root, done)
@@ -446,7 +316,7 @@ function M.collect_async(opts, callback)
 			local remaining = #files
 			local chunks = {}
 			for index, path in ipairs(files) do
-				runner.read_file(root .. "/" .. path, function(data)
+				adapter.read_file(root .. "/" .. path, function(data)
 					if cancelled then
 						return
 					end
@@ -472,15 +342,7 @@ function M.collect_async(opts, callback)
 					finish(nil, ("Git rejected revision or range %q: %s"):format(spec.revision, comparison_err))
 					return
 				end
-				local description = diff_spec.describe(spec)
-				finish({
-					root = root,
-					spec = spec,
-					description = description,
-					mutable = diff_spec.is_mutable(spec),
-					empty_message = "No changes for " .. description,
-					sections = { { id = "comparison", title = "Comparison: " .. description, diff = comparison } },
-				}, nil)
+				finish(revision_collection(root, spec, comparison), nil)
 			end)
 			return
 		end
