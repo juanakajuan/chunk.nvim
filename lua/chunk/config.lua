@@ -12,7 +12,7 @@ M.defaults = {
 	},
 	files_panel = {
 		enabled = true,
-		width = 30,
+		width = 34,
 	},
 	keymaps = {
 		open_file = "<CR>",

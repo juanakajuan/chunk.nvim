@@ -56,12 +56,13 @@ view and retained when it is refreshed.
 - `:Chunk` opens the inline diff view using the syntax above.
 - `:ChunkRefresh` refreshes the current Chunk buffer.
 - `<CR>` opens the real file at the diff line.
+- The diff pane shows only the file selected in the files sidebar.
 - `<CR>` in the files sidebar selects a changed file and shows its diff.
 - `R` refreshes.
 - `s` stages the tracked text hunk under the cursor from `Changes`.
 - `u` unstages the tracked text hunk under the cursor from `Staged Changes`.
 - `]h` and `[h` jump between hunks.
-- `]f` and `[f` jump between files.
+- `]f` and `[f` move between files while the files sidebar is focused.
 - `q` closes the Chunk tab.
 
 ## Configuration
@@ -79,7 +80,7 @@ require("chunk").setup({
   },
   files_panel = {
     enabled = true,
-    width = 30,
+    width = 34,
   },
   keymaps = {
     open_file = "<CR>",
@@ -100,6 +101,10 @@ Set either mapping to `false` or an empty string to disable it. Staging and
 unstaging operate on the index only and refresh the view after Git accepts the
 patch. Untracked files and binary changes are displayed but do not support
 hunk actions.
+
+The files sidebar groups paths into an expandable directory tree and shows
+file-type icons with per-file addition and deletion totals. Press `<CR>` on a
+folder to collapse or expand it. The icons are designed for a Nerd Font.
 
 ## Source-backed mode
 

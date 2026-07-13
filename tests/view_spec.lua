@@ -32,6 +32,7 @@ local function run(argv, cwd)
 end
 
 local function write_file(path, lines)
+	vim.fn.mkdir(vim.fn.fnamemodify(path, ":h"), "p")
 	vim.fn.writefile(lines, path)
 end
 
@@ -65,7 +66,7 @@ local function setup_changed_files_repo(root)
 	run({ "git", "commit", "-qm", "initial" }, root)
 
 	write_file(root .. "/a.txt", { "one", "two" })
-	write_file(root .. "/b.txt", { "new" })
+	write_file(root .. "/nested/b.txt", { "new" })
 end
 
 local function setup_staged_and_unstaged_repo(root)
@@ -143,7 +144,10 @@ local function open_chunk(root, filename, options)
 		"Chunk collection completed"
 	)
 
-	return find_chunk_windows()
+	local diff_win, files_win = find_chunk_windows()
+	assert(diff_win, "diff window exists")
+	assert(files_win, "files window exists")
+	return diff_win, files_win
 end
 
 local function with_hunk_keymaps(keymaps, fn)
@@ -168,10 +172,21 @@ local function test_files_panel_selects_file_diff()
 		assert_equal(#vim.api.nvim_tabpage_list_wins(vim.api.nvim_get_current_tabpage()), 2, "chunk window count")
 
 		local file_lines = window_lines(files_win)
-		assert_equal(#file_lines, 3, "files panel line count")
+		assert_equal(#file_lines, 4, "files panel line count")
 		assert_equal(file_lines[1], "Changes", "files section heading")
-		assert_match(file_lines[2], "^ M a%.txt", "modified file row")
-		assert_match(file_lines[3], "^ A b%.txt", "added file row")
+		assert_match(file_lines[2], "^▾ .+ nested/$", "directory row")
+		assert_match(file_lines[3], "^     b%.txt%s+%+1$", "nested added file row")
+		assert_match(file_lines[4], "^   a%.txt%s+%+1$", "modified root file row")
+		assert_equal(vim.api.nvim_get_option_value("winbar", { win = files_win }), "", "files panel has no header")
+		local initial_diff_lines = window_lines(diff_win)
+		assert(vim.list_contains(initial_diff_lines, "diff --git a/a.txt b/a.txt"), "initial file diff is rendered")
+		assert(
+			not vim.list_contains(initial_diff_lines, "diff --git a/nested/b.txt b/nested/b.txt"),
+			"other file is excluded"
+		)
+		local diff_buf = vim.api.nvim_win_get_buf(diff_win)
+		assert_equal(buffer_keymap(diff_buf, "]f"), nil, "diff has no next-file mapping")
+		assert_equal(buffer_keymap(diff_buf, "[f"), nil, "diff has no previous-file mapping")
 
 		vim.api.nvim_set_current_win(files_win)
 		vim.api.nvim_win_set_cursor(files_win, { 3, 0 })
@@ -179,11 +194,18 @@ local function test_files_panel_selects_file_diff()
 
 		assert_equal(vim.api.nvim_get_current_win(), diff_win, "select focuses diff window")
 		assert_match(current_window_line(diff_win), "b%.txt", "selected file diff header")
+		local selected_diff_lines = window_lines(diff_win)
+		assert(
+			vim.list_contains(selected_diff_lines, "diff --git a/nested/b.txt b/nested/b.txt"),
+			"selected file is rendered"
+		)
+		assert(not vim.list_contains(selected_diff_lines, "diff --git a/a.txt b/a.txt"), "previous file is removed")
 
-		chunk.jump("file_header", -1)
-
-		assert_match(current_window_line(diff_win), "a%.txt", "previous file diff header")
-		assert_equal(vim.api.nvim_win_get_cursor(files_win)[1], 2, "files panel cursor sync")
+		vim.api.nvim_set_current_win(files_win)
+		chunk.select_relative_file(1)
+		assert_equal(vim.api.nvim_get_current_win(), files_win, "sidebar navigation keeps sidebar focus")
+		assert_equal(vim.api.nvim_win_get_cursor(files_win)[1], 4, "sidebar navigation follows tree order")
+		assert_match(current_window_line(diff_win), "a%.txt", "tree navigation selects the root file")
 
 		chunk.close()
 	end)
@@ -204,31 +226,24 @@ local function test_staged_and_unstaged_sections_distinguish_same_path()
 		assert_equal(buffer_keymap(diff_buf, "s").desc, "Stage hunk", "default stage mapping")
 		assert_equal(buffer_keymap(diff_buf, "u").desc, "Unstage hunk", "default unstage mapping")
 		assert_equal(file_lines[1], "Changes", "unstaged files section heading")
-		assert_match(file_lines[2], "^ M shared%.txt", "unstaged file row")
+		assert_match(file_lines[2], "^   shared%.txt%s+%+1 %-1$", "unstaged file row")
 		assert_equal(file_lines[3], "Staged Changes", "staged files section heading")
-		assert_match(file_lines[4], "^ M shared%.txt", "staged file row")
+		assert_match(file_lines[4], "^   shared%.txt%s+%+1 %-1$", "staged file row")
 
 		local diff_lines = window_lines(diff_win)
 		assert_equal(diff_lines[1], "Changes", "unstaged diff section heading")
 		assert(vim.list_contains(diff_lines, "+unstaged line 14"), "unstaged hunk is rendered")
-		assert(vim.list_contains(diff_lines, "Staged Changes"), "staged diff section heading is rendered")
-		assert(vim.list_contains(diff_lines, "+staged line 02"), "staged hunk is rendered")
+		assert(not vim.list_contains(diff_lines, "Staged Changes"), "staged section is excluded")
+		assert(not vim.list_contains(diff_lines, "+staged line 02"), "staged hunk is excluded")
 
-		local staged_heading_row = vim.fn.index(diff_lines, "Staged Changes") + 1
 		vim.api.nvim_set_current_win(files_win)
 		vim.api.nvim_win_set_cursor(files_win, { 4, 0 })
 		chunk.select_file_at_cursor()
-		assert(
-			vim.api.nvim_win_get_cursor(diff_win)[1] > staged_heading_row,
-			"staged path selects the staged file entry"
-		)
-
-		chunk.jump("file_header", -1)
-		assert(
-			vim.api.nvim_win_get_cursor(diff_win)[1] < staged_heading_row,
-			"file navigation reaches the distinct unstaged entry"
-		)
-		assert_equal(vim.api.nvim_win_get_cursor(files_win)[1], 2, "sidebar selection follows section-aware navigation")
+		diff_lines = window_lines(diff_win)
+		assert_equal(diff_lines[1], "Staged Changes", "selected staged section is rendered")
+		assert(vim.list_contains(diff_lines, "+staged line 02"), "selected staged hunk is rendered")
+		assert(not vim.list_contains(diff_lines, "+unstaged line 14"), "unstaged hunk is excluded")
+		assert_equal(vim.api.nvim_win_get_cursor(files_win)[1], 4, "sidebar keeps the selected staged entry")
 
 		chunk.close()
 	end)

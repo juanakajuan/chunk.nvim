@@ -108,15 +108,15 @@ end
 local function capture_notification(fn)
 	local original_notify = vim.notify
 	local notification = nil
-	vim.notify = function(message, level)
+	rawset(vim, "notify", function(message, level)
 		notification = {
 			message = message,
 			level = level,
 		}
-	end
+	end)
 
 	local ok, err = xpcall(fn, debug.traceback)
-	vim.notify = original_notify
+	rawset(vim, "notify", original_notify)
 	if not ok then
 		error(err, 0)
 	end
@@ -176,7 +176,7 @@ local function test_stage_and_unstage_hunk_update_only_index_and_follow_selectio
 		assert_not_contains(unstaged_after_stage, "+unstaged line 16", "target hunk is no longer unstaged")
 
 		local lines = window_lines(diff_win)
-		assert(vim.list_contains(lines, "Changes"), "unrelated unstaged hunk remains after refresh")
+		assert(not vim.list_contains(lines, "Changes"), "unselected unstaged entry is excluded after refresh")
 		assert(vim.list_contains(lines, "Staged Changes"), "staged section remains after refresh")
 
 		local cursor_row = vim.api.nvim_win_get_cursor(diff_win)[1]
@@ -205,13 +205,14 @@ local function test_stage_and_unstage_hunk_update_only_index_and_follow_selectio
 
 		lines = window_lines(diff_win)
 		assert(vim.list_contains(lines, "Changes"), "unstaged section returns after refresh")
-		assert(vim.list_contains(lines, "Staged Changes"), "unrelated staged hunk remains")
+		assert(not vim.list_contains(lines, "Staged Changes"), "unselected staged entry is excluded")
 
 		cursor_row = vim.api.nvim_win_get_cursor(diff_win)[1]
 		nearby = table.concat(vim.list_slice(lines, cursor_row, cursor_row + 4), "\n")
 		assert_contains(nearby, "unstaged line 16", "selection follows the unstaged hunk")
 
 		local notification = capture_notification(chunk.unstage_hunk)
+		assert(notification, "inapplicable action sends a notification")
 		assert_equal(notification.level, vim.log.levels.WARN, "inapplicable action warns")
 		assert_contains(notification.message, "not staged", "warning explains why action is unavailable")
 		assert_equal(
@@ -238,6 +239,7 @@ local function test_rejected_patch_reports_git_error_without_refreshing()
 		local index_before_action = run({ "git", "show", ":shared.txt" }, root)
 		local notification = capture_notification(chunk.stage_hunk)
 
+		assert(notification, "rejected patch sends a notification")
 		assert_equal(notification.level, vim.log.levels.ERROR, "rejected patch reports an error")
 		assert_contains(notification.message, "Could not stage hunk:", "error identifies the failed action")
 		assert(#notification.message > #"Could not stage hunk: ", "error includes Git's rejection reason")

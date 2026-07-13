@@ -130,12 +130,12 @@ end
 local function capture_notification(fn)
 	local original_notify = vim.notify
 	local notification = nil
-	vim.notify = function(message, level)
+	rawset(vim, "notify", function(message, level)
 		notification = {
 			message = message,
 			level = level,
 		}
-	end
+	end)
 
 	local ok, err = xpcall(fn, debug.traceback)
 	if ok then
@@ -143,7 +143,7 @@ local function capture_notification(fn)
 			return notification ~= nil
 		end, 10)
 	end
-	vim.notify = original_notify
+	rawset(vim, "notify", original_notify)
 	if not ok then
 		error(err, 0)
 	end
@@ -164,14 +164,15 @@ local function open_revision_view(root, pathspec)
 		end, 10),
 		"Chunk collection completed"
 	)
-	return find_chunk_windows()
+	local diff_win, files_win = find_chunk_windows()
+	assert(diff_win, "revision diff window exists")
+	assert(files_win, "revision files window exists")
+	return diff_win, files_win
 end
 
 local function test_chunk_command_renders_filtered_revision_range()
 	with_diverging_repo(function(root)
 		local diff_win, files_win = open_revision_view(root)
-		assert(diff_win, "revision diff window exists")
-		assert(files_win, "revision files window exists")
 
 		local diff_lines = window_lines(diff_win)
 		local file_lines = window_lines(files_win)
@@ -180,8 +181,22 @@ local function test_chunk_command_renders_filtered_revision_range()
 		assert_contains(diff_lines, "+return 'feature'", "matching revision content")
 		assert_lines_exclude(diff_lines, "outside/ignored.lua", "outside revision path is filtered")
 		assert_lines_exclude(diff_lines, "inside/current-only.lua", "working-tree files are excluded")
-		assert_equal(#file_lines, 2, "filtered revision file row count")
-		assert(file_lines[2]:match("inside/selected%.lua$"), "matching revision file is rendered")
+		assert_equal(#file_lines, 3, "filtered revision file row count")
+		assert(file_lines[2]:match("inside/$"), "matching directory is rendered")
+		assert(file_lines[3]:match("selected%.lua%s+%+1$"), "matching revision file is rendered")
+
+		vim.api.nvim_set_current_win(files_win)
+		vim.api.nvim_win_set_cursor(files_win, { 2, 0 })
+		chunk.select_file_at_cursor()
+		file_lines = window_lines(files_win)
+		assert_equal(#file_lines, 2, "collapsed directory hides its files")
+		assert(file_lines[2]:match("^▸ .+ inside/$"), "collapsed directory uses a closed chevron")
+		assert_equal(vim.api.nvim_get_current_win(), files_win, "folder toggle keeps sidebar focus")
+
+		chunk.select_file_at_cursor()
+		file_lines = window_lines(files_win)
+		assert_equal(#file_lines, 3, "expanded directory restores its files")
+		assert(file_lines[2]:match("^▾ .+ inside/$"), "expanded directory uses an open chevron")
 
 		chunk.close()
 	end)
@@ -221,6 +236,7 @@ local function test_revision_view_disables_index_mutation_actions()
 		vim.api.nvim_win_set_cursor(diff_win, { row, 0 })
 		local notification = capture_notification(chunk.stage_hunk)
 
+		assert(notification, "direct mutation sends a notification")
 		assert_equal(notification.level, vim.log.levels.WARN, "direct mutation warns")
 		assert_text_contains(
 			notification.message,
@@ -245,6 +261,7 @@ local function test_invalid_revision_reports_error_without_replacing_current_vie
 			vim.cmd("Chunk definitely-not-a-revision -- inside/")
 		end)
 
+		assert(notification, "invalid revision sends a notification")
 		assert_equal(notification.level, vim.log.levels.ERROR, "invalid revision reports an error")
 		assert_text_contains(
 			notification.message,
@@ -268,6 +285,7 @@ local function test_malformed_arguments_report_command_contract_error()
 			vim.cmd("Chunk main HEAD")
 		end)
 
+		assert(notification, "malformed arguments send a notification")
 		assert_equal(notification.level, vim.log.levels.ERROR, "malformed arguments report an error")
 		assert_text_contains(notification.message, "Invalid :Chunk arguments", "error identifies malformed command")
 		assert_text_contains(notification.message, "at most one revision or range", "error explains accepted syntax")
@@ -310,6 +328,7 @@ local function test_invalid_revision_preserves_existing_chunk_view()
 			vim.cmd("Chunk definitely-not-a-revision -- inside/")
 		end)
 
+		assert(notification, "invalid revision sends a notification")
 		assert_text_contains(
 			notification.message,
 			"Git rejected revision or range",

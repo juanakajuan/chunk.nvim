@@ -1,6 +1,7 @@
 local M = {}
 
 local ns = vim.api.nvim_create_namespace("chunk")
+local sidebar = require("chunk.sidebar")
 
 local highlights = {
 	ChunkFile = "Directory",
@@ -9,6 +10,23 @@ local highlights = {
 	ChunkBinary = "WarningMsg",
 	ChunkSection = "Title",
 	ChunkFileSelected = "Visual",
+	ChunkSidebarNormal = "Normal",
+	ChunkSidebarBorder = "WinSeparator",
+	ChunkSidebarFile = "Normal",
+	ChunkSidebarFolder = "Directory",
+	ChunkSidebarFolderIcon = "Directory",
+	ChunkSidebarAccent = "Special",
+	ChunkSidebarAdded = "DiagnosticOk",
+	ChunkSidebarDeleted = "DiagnosticError",
+	ChunkSidebarStaged = "DiagnosticOk",
+	ChunkSidebarIconKeyword = "Keyword",
+	ChunkSidebarIconType = "Type",
+	ChunkSidebarIconSpecial = "Special",
+	ChunkSidebarIconFunction = "Function",
+	ChunkSidebarIconConstant = "Constant",
+	ChunkSidebarIconString = "String",
+	ChunkSidebarIconText = "Normal",
+	ChunkSidebarIconMuted = "Comment",
 }
 
 local diff_highlights = {
@@ -26,22 +44,6 @@ local line_highlights = {
 	binary = "ChunkBinary",
 	section_heading = "ChunkSection",
 	empty = "ChunkMeta",
-}
-
-local default_file_status = {
-	label = "M",
-	highlight = "ChunkMeta",
-}
-
-local file_statuses = {
-	added = {
-		label = "A",
-		highlight = "ChunkAdd",
-	},
-	deleted = {
-		label = "D",
-		highlight = "ChunkDelete",
-	},
 }
 
 function M.set_highlights()
@@ -65,30 +67,6 @@ local function text_lines(rendered)
 	return lines
 end
 
-local function file_status(status)
-	return file_statuses[status] or default_file_status
-end
-
-local function file_panel_lines(items)
-	if #items == 0 then
-		return { "No changed files" }
-	end
-
-	local lines = {}
-	for _, item in ipairs(items) do
-		if item.kind == "section_heading" then
-			table.insert(lines, item.text)
-		else
-			local file = item.file
-			local status = file_status(file.status)
-			local suffix = file.is_binary and " [binary]" or ""
-			table.insert(lines, (" %s %s%s"):format(status.label, file.path, suffix))
-		end
-	end
-
-	return lines
-end
-
 local function render_readonly_buffer(buf, lines, apply_buffer_highlights)
 	M.set_highlights()
 
@@ -102,11 +80,23 @@ local function render_readonly_buffer(buf, lines, apply_buffer_highlights)
 	vim.api.nvim_set_option_value("readonly", true, { buf = buf })
 end
 
+local function set_range_highlight(buf, group, row, start_col, end_col)
+	if end_col < 0 then
+		local line = vim.api.nvim_buf_get_lines(buf, row, row + 1, false)[1] or ""
+		end_col = #line
+	end
+
+	vim.api.nvim_buf_set_extmark(buf, ns, row, start_col, {
+		end_col = end_col,
+		hl_group = group,
+	})
+end
+
 local function apply_highlights(buf, rendered)
 	for index, line in ipairs(rendered) do
 		local group = line_highlights[line.kind]
 		if group then
-			vim.api.nvim_buf_add_highlight(buf, ns, group, index - 1, 0, -1)
+			set_range_highlight(buf, group, index - 1, 0, -1)
 		end
 	end
 end
@@ -117,29 +107,31 @@ function M.render(buf, rendered)
 	end)
 end
 
-local function apply_file_highlights(buf, items, selected_index)
-	if #items == 0 then
-		vim.api.nvim_buf_add_highlight(buf, ns, "ChunkMeta", 0, 0, -1)
+local function apply_file_highlights(buf, rendered)
+	if #rendered == 0 then
+		set_range_highlight(buf, "ChunkMeta", 0, 0, -1)
 		return
 	end
 
-	for row, item in ipairs(items) do
-		if item.kind == "section_heading" then
-			vim.api.nvim_buf_add_highlight(buf, ns, "ChunkSection", row - 1, 0, -1)
-		else
-			local file = item.file
-			if item.file_index == selected_index then
-				vim.api.nvim_buf_add_highlight(buf, ns, "ChunkFileSelected", row - 1, 0, -1)
-			end
-
-			vim.api.nvim_buf_add_highlight(buf, ns, file_status(file.status).highlight, row - 1, 1, 2)
+	for row, line in ipairs(rendered) do
+		if line.selected then
+			vim.api.nvim_buf_set_extmark(buf, ns, row - 1, 0, {
+				line_hl_group = "ChunkFileSelected",
+				hl_eol = true,
+				priority = 100,
+			})
+		end
+		for _, highlight in ipairs(line.highlights or {}) do
+			set_range_highlight(buf, highlight.group, row - 1, highlight.start_col, highlight.end_col)
 		end
 	end
 end
 
-function M.render_files(buf, items, selected_index)
-	render_readonly_buffer(buf, file_panel_lines(items), function()
-		apply_file_highlights(buf, items, selected_index)
+function M.render_files(buf, items, selected_index, width)
+	local rendered = sidebar.render(items, selected_index, width)
+	local lines = #rendered == 0 and { "No changed files" } or text_lines(rendered)
+	render_readonly_buffer(buf, lines, function()
+		apply_file_highlights(buf, rendered)
 	end)
 end
 
