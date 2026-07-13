@@ -1,3 +1,5 @@
+local diff_spec = require("chunk.diff_spec")
+
 local M = {}
 
 local function failure_message(result)
@@ -54,7 +56,7 @@ function M.current_start_dir()
 	return vim.fn.getcwd()
 end
 
-local function tracked_diff(root, context_lines, cached)
+function M.diff_argv(spec, context_lines, cached)
 	local argv = {
 		"diff",
 		"--no-color",
@@ -66,17 +68,31 @@ local function tracked_diff(root, context_lines, cached)
 		table.insert(argv, "--cached")
 	end
 
+	if spec.mode == "revision" then
+		table.insert(argv, spec.revision)
+	end
+
 	table.insert(argv, "--")
+	vim.list_extend(argv, spec.pathspecs or {})
+	return argv
+end
+
+local function tracked_diff(root, context_lines, spec, cached)
+	local argv = M.diff_argv(spec, context_lines, cached)
 	return run_git(root, argv)
 end
 
-local function list_untracked(root)
-	local out, err = run_git(root, {
+local function list_untracked(root, pathspecs)
+	local argv = {
 		"ls-files",
 		"--others",
 		"--exclude-standard",
 		"-z",
-	})
+		"--",
+	}
+	vim.list_extend(argv, pathspecs or {})
+
+	local out, err = run_git(root, argv)
 
 	if not out then
 		return nil, err
@@ -180,8 +196,8 @@ local function synthesize_untracked_file(root, path)
 	return M.synthesize_untracked_diff(path, data)
 end
 
-local function collect_untracked_diffs(root)
-	local files, err = list_untracked(root)
+local function collect_untracked_diffs(root, pathspecs)
+	local files, err = list_untracked(root, pathspecs)
 	if not files then
 		return nil, err
 	end
@@ -196,6 +212,10 @@ end
 
 function M.collect(opts)
 	opts = opts or {}
+	local spec = opts.spec or {
+		mode = "working_tree",
+		pathspecs = {},
+	}
 
 	local root, root_err = M.repo_root(opts.start_dir or M.current_start_dir())
 	if not root then
@@ -203,18 +223,42 @@ function M.collect(opts)
 	end
 
 	local context_lines = opts.context_lines or 3
-	local unstaged, unstaged_err = tracked_diff(root, context_lines, false)
+	if spec.mode == "revision" then
+		local comparison, comparison_err = tracked_diff(root, context_lines, spec, false)
+		if not comparison then
+			return nil, ("Git rejected revision or range %q: %s"):format(spec.revision, comparison_err)
+		end
+
+		local description = diff_spec.describe(spec)
+		local collected = {
+			root = root,
+			spec = spec,
+			description = description,
+			mutable = diff_spec.is_mutable(spec),
+			empty_message = "No changes for " .. description,
+			sections = {
+				{
+					id = "comparison",
+					title = "Comparison: " .. description,
+					diff = comparison,
+				},
+			},
+		}
+		return collected, nil
+	end
+
+	local unstaged, unstaged_err = tracked_diff(root, context_lines, spec, false)
 	if not unstaged then
 		return nil, unstaged_err
 	end
 
-	local staged, staged_err = tracked_diff(root, context_lines, true)
+	local staged, staged_err = tracked_diff(root, context_lines, spec, true)
 	if not staged then
 		return nil, staged_err
 	end
 
 	if opts.include_untracked ~= false then
-		local untracked, untracked_err = collect_untracked_diffs(root)
+		local untracked, untracked_err = collect_untracked_diffs(root, spec.pathspecs)
 		if not untracked then
 			return nil, untracked_err
 		end
@@ -222,22 +266,36 @@ function M.collect(opts)
 		unstaged = unstaged .. untracked
 	end
 
-	return {
+	local description = diff_spec.describe(spec)
+	local changes_title = "Changes"
+	local staged_title = "Staged Changes"
+	local empty_message = "No staged or unstaged changes"
+	if #spec.pathspecs > 0 then
+		changes_title = changes_title .. ": " .. description
+		staged_title = staged_title .. ": " .. description
+		empty_message = empty_message .. " for " .. description
+	end
+
+	local collected = {
 		root = root,
+		spec = spec,
+		description = description,
+		mutable = diff_spec.is_mutable(spec),
+		empty_message = empty_message,
 		sections = {
 			{
 				id = "unstaged",
-				title = "Changes",
+				title = changes_title,
 				diff = unstaged,
 			},
 			{
 				id = "staged",
-				title = "Staged Changes",
+				title = staged_title,
 				diff = staged,
 			},
 		},
-	},
-		nil
+	}
+	return collected, nil
 end
 
 local function apply_cached_patch(root, patch, reverse)

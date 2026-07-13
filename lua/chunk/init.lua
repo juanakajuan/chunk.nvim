@@ -1,4 +1,5 @@
 local config = require("chunk.config")
+local diff_spec = require("chunk.diff_spec")
 local git = require("chunk.git")
 local parser = require("chunk.parser")
 local render = require("chunk.render")
@@ -124,7 +125,7 @@ local function render_model_for_changes(collected)
 		model.lines = {
 			{
 				kind = "empty",
-				text = "No staged or unstaged changes",
+				text = collected.empty_message or "No staged or unstaged changes",
 			},
 		}
 	end
@@ -132,11 +133,12 @@ local function render_model_for_changes(collected)
 	return model
 end
 
-local function collect_diff(start_dir)
+local function collect_diff(start_dir, spec)
 	return git.collect({
 		start_dir = start_dir,
 		context_lines = config.options.context_lines,
 		include_untracked = config.options.include_untracked,
+		spec = spec,
 	})
 end
 
@@ -331,13 +333,15 @@ local function set_file_navigation_keymaps(buf, maps, next_file, prev_file)
 	set_keymap(buf, maps.prev_file, prev_file, "Previous file")
 end
 
-local function apply_diff_keymaps(buf)
+local function apply_diff_keymaps(buf, mutable)
 	local maps = config.options.keymaps
 
 	set_keymap(buf, maps.open_file, M.open_file_at_cursor, "Open changed file")
 	set_keymap(buf, maps.refresh, M.refresh, "Refresh Chunk diff")
-	set_keymap(buf, maps.stage_hunk, M.stage_hunk, "Stage hunk")
-	set_keymap(buf, maps.unstage_hunk, M.unstage_hunk, "Unstage hunk")
+	if mutable then
+		set_keymap(buf, maps.stage_hunk, M.stage_hunk, "Stage hunk")
+		set_keymap(buf, maps.unstage_hunk, M.unstage_hunk, "Unstage hunk")
+	end
 	set_keymap(buf, maps.next_hunk, function()
 		M.jump("hunk", 1)
 	end, "Next hunk")
@@ -615,9 +619,16 @@ function M.setup(opts)
 	config.setup(opts)
 end
 
-function M.open()
-	local start_dir = git.current_start_dir()
-	local collected, err = collect_diff(start_dir)
+function M.open(args)
+	local spec, spec_err = diff_spec.parse(args)
+	if not spec then
+		notify("Invalid :Chunk arguments: " .. spec_err, vim.log.levels.ERROR)
+		return
+	end
+
+	local active_state = current_buffer_state()
+	local start_dir = active_state and active_state.root or git.current_start_dir()
+	local collected, err = collect_diff(start_dir, spec)
 	if not collected then
 		notify(err, vim.log.levels.ERROR)
 		return
@@ -626,6 +637,8 @@ function M.open()
 	local view = open_diff_view()
 	local state = {
 		root = collected.root,
+		spec = collected.spec,
+		mutable = collected.mutable,
 		origin_tab = view.origin_tab,
 		origin_win = view.origin_win,
 		open_mode = config.options.open_mode,
@@ -652,7 +665,7 @@ function M.open()
 		})
 	end
 
-	apply_diff_keymaps(state.diff_buf)
+	apply_diff_keymaps(state.diff_buf, state.mutable)
 	if valid_buf(state.files_buf) then
 		apply_files_keymaps(state.files_buf)
 	end
@@ -676,13 +689,15 @@ function M.refresh(opts)
 	local selected_identity = current_is_files_panel and file_identity_at_panel_row(state, files_cursor) or nil
 	local diff_cursor = valid_win(state.diff_win) and vim.api.nvim_win_get_cursor(state.diff_win) or { 1, 0 }
 	local diff_selection = opts.selection or selection_identity_for_line(state.line_map[diff_cursor[1]])
-	local collected, err = collect_diff(state.root)
+	local collected, err = collect_diff(state.root, state.spec)
 	if not collected then
 		notify(err, vim.log.levels.ERROR)
 		return
 	end
 
 	state.root = collected.root
+	state.spec = collected.spec
+	state.mutable = collected.mutable
 	render_model_into_view(state, render_model_for_changes(collected))
 
 	if current_is_files_panel then
@@ -768,6 +783,10 @@ local function apply_hunk_action(action)
 	local state = current_buffer_state()
 	if not state or vim.api.nvim_get_current_buf() ~= state.diff_buf then
 		notify(action.cursor_message, vim.log.levels.WARN)
+		return
+	end
+	if state.mutable == false then
+		notify("Index mutation is unavailable in revision comparisons", vim.log.levels.WARN)
 		return
 	end
 

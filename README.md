@@ -27,7 +27,30 @@ With lazy.nvim from this local checkout:
 
 ## Usage
 
-- `:Chunk` opens the inline diff view.
+```text
+:Chunk [<revision-or-range>] [-- <pathspec>...]
+```
+
+Examples:
+
+```vim
+:Chunk
+:Chunk main...HEAD
+:Chunk HEAD~3..HEAD -- lua/ tests/
+:Chunk -- lua/
+```
+
+With no arguments, `:Chunk` opens the existing working-tree view with unstaged,
+staged, and configured untracked changes. Put Git pathspecs after `--` to limit
+that view; matching untracked files are included when `include_untracked` is
+enabled.
+
+One revision or range may appear before `--`. Revision views show a single
+read-only comparison, do not synthesize untracked files, and do not provide the
+stage or unstage actions. The active revision and pathspecs are shown in the
+view and retained when it is refreshed.
+
+- `:Chunk` opens the inline diff view using the syntax above.
 - `:ChunkRefresh` refreshes the current Chunk buffer.
 - `<CR>` opens the real file at the diff line.
 - `<CR>` in the files sidebar selects a changed file and shows its diff.
