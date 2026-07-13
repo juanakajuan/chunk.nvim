@@ -141,13 +141,6 @@ function M.open(opts)
 	return view
 end
 
-function M.refresh(view, baseline)
-	if view then
-		view.baseline = baseline or view.baseline
-		decorate(view)
-	end
-end
-
 function M.close(view)
 	if not view or view.closed then
 		return
@@ -169,7 +162,5 @@ function M.close(view)
 		end
 	end
 end
-
-M.namespace = namespace
 
 return M

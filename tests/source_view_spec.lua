@@ -2,7 +2,6 @@ package.path =
 	table.concat({ vim.fn.getcwd() .. "/lua/?.lua", vim.fn.getcwd() .. "/lua/?/init.lua", package.path }, ";")
 
 local chunk = require("chunk")
-local source_view = require("chunk.source_view")
 
 local function run(argv, cwd)
 	local result = vim.system(argv, { cwd = cwd, text = true }):wait()
@@ -80,7 +79,7 @@ assert(vim.api.nvim_win_call(original_win, function()
 	return vim.fn.foldclosed(1)
 end) == -1, "folds do not affect another source window")
 
-local marks = vim.api.nvim_buf_get_extmarks(source_buf, source_view.namespace, 0, -1, { details = true })
+local marks = vim.api.nvim_buf_get_extmarks(source_buf, -1, 0, -1, { details = true })
 assert(#marks >= 2, "changed and deleted lines are decorated")
 assert(
 	vim.iter(marks):any(function(mark)
@@ -88,6 +87,12 @@ assert(
 	end),
 	"deleted baseline lines are virtual"
 )
+local decoration_namespaces = {}
+for _, mark in ipairs(marks) do
+	if mark[4].virt_lines ~= nil then
+		decoration_namespaces[mark[4].ns_id] = true
+	end
+end
 
 vim.api.nvim_buf_set_lines(source_buf, 7, 8, false, { "return one -- written" })
 vim.api.nvim_buf_call(source_buf, function()
@@ -97,7 +102,9 @@ assert(vim.fn.readfile(path)[8] == "return one -- written", "write updates the w
 chunk.close()
 assert(vim.api.nvim_buf_is_valid(source_buf), "closing Chunk keeps the source buffer")
 assert(
-	#vim.api.nvim_buf_get_extmarks(source_buf, source_view.namespace, 0, -1, {}) == 0,
+	not vim.iter(vim.api.nvim_buf_get_extmarks(source_buf, -1, 0, -1, { details = true })):any(function(mark)
+		return decoration_namespaces[mark[4].ns_id] == true
+	end),
 	"closing clears Chunk decorations"
 )
 
