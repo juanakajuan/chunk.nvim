@@ -52,14 +52,12 @@ enabled.
 One revision or range may appear before `--`. Revision views show a single
 read-only comparison, do not synthesize untracked files, and do not provide the
 stage or unstage actions. The active revision and pathspecs are shown in the
-view and retained when it is refreshed.
+view and retained as it updates.
 
 - `:Chunk` opens the inline diff view using the syntax above.
-- `:ChunkRefresh` refreshes the current Chunk buffer.
 - `<CR>` opens the real file at the diff line.
 - The diff pane shows only the file selected in the files sidebar.
 - `<CR>` in the files sidebar selects a changed file and shows its diff.
-- `R` refreshes.
 - `s` stages the tracked text hunk under the cursor from `Changes`.
 - `u` unstages the tracked text hunk under the cursor from `Staged Changes`.
 - `]h` and `[h` jump between hunks.
@@ -86,7 +84,6 @@ require("chunk").setup({
   keymaps = {
     open_file = "<CR>",
     select_file = "<CR>",
-    refresh = "R",
     stage_hunk = "s",
     unstage_hunk = "u",
     next_hunk = "]h",
@@ -98,10 +95,11 @@ require("chunk").setup({
 })
 ```
 
-Set either mapping to `false` or an empty string to disable it. Staging and
-unstaging operate on the index only and refresh the view after Git accepts the
-patch. Untracked files and binary changes are displayed but do not support
-hunk actions.
+Set any mapping to `false` or an empty string to disable it. Open Chunk views
+refresh automatically after files are written, Neovim regains focus, terminal
+or shell commands finish, and you return to a Chunk window. Staging and
+unstaging operate on the index only. Untracked files and binary changes are
+displayed but do not support hunk actions.
 
 The files sidebar groups paths into an expandable directory tree and shows
 file-type icons with per-file addition and deletion totals. Press `<CR>` on a

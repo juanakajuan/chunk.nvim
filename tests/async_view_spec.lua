@@ -4,19 +4,18 @@ package.path = table.concat({
 	package.path,
 }, ";")
 
-local git = require("chunk.git")
 local pending = {}
+local git = require("chunk.git")
 local original_collect = git.collect
 
-git.collect = function(opts, callback)
-	local request = { opts = opts, callback = callback, cancelled = false }
+rawset(git, "collect", function(_, callback)
+	local request = { callback = callback, cancelled = false }
+	request.cancel = function()
+		request.cancelled = true
+	end
 	table.insert(pending, request)
-	return {
-		cancel = function()
-			request.cancelled = true
-		end,
-	}
-end
+	return request
+end)
 
 local chunk = require("chunk")
 
@@ -86,10 +85,10 @@ assert(not vim.list_contains(lines(), "+stale"), "stale refresh cannot overwrite
 
 local before_failure = table.concat(lines(), "\n")
 local original_notify = vim.notify
-vim.notify = function() end
+rawset(vim, "notify", function() end)
 chunk.refresh()
 complete(pending[4], nil, "refresh failed")
-vim.notify = original_notify
+rawset(vim, "notify", original_notify)
 assert(table.concat(lines(), "\n") == before_failure, "failed refresh retains the last successful result")
 
 chunk.refresh()
@@ -99,5 +98,5 @@ assert(closing.cancelled, "closing cancels collection")
 closing.callback(collected("too late"))
 vim.wait(20)
 
-git.collect = original_collect
+rawset(git, "collect", original_collect)
 print("ok 1 test")

@@ -17,7 +17,6 @@ M.defaults = {
 	keymaps = {
 		open_file = "<CR>",
 		select_file = "<CR>",
-		refresh = "R",
 		stage_hunk = "s",
 		unstage_hunk = "u",
 		next_hunk = "]h",

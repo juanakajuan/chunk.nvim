@@ -11,6 +11,9 @@ local M = {}
 local states = setmetatable({}, {
 	__mode = "k",
 })
+local active_views = setmetatable({}, {
+	__mode = "k",
+})
 
 local augroup = vim.api.nvim_create_augroup("chunk", {
 	clear = false,
@@ -183,6 +186,7 @@ local function clear_buffer_state(buf)
 end
 
 local function clear_view_state(state)
+	active_views[state] = nil
 	if state.request then
 		state.request.cancel()
 		state.request = nil
@@ -357,7 +361,6 @@ local function apply_diff_keymaps(buf, mutable)
 	local maps = config.options.keymaps
 
 	set_keymap(buf, maps.open_file, M.open_file_at_cursor, "Open changed file")
-	set_keymap(buf, maps.refresh, M.refresh, "Refresh Chunk diff")
 	if mutable then
 		set_keymap(buf, maps.stage_hunk, M.stage_hunk, "Stage hunk")
 		set_keymap(buf, maps.unstage_hunk, M.unstage_hunk, "Unstage hunk")
@@ -375,7 +378,6 @@ local function apply_files_keymaps(buf)
 	local maps = config.options.keymaps
 
 	set_keymap(buf, maps.select_file, M.select_file_at_cursor, "Show selected file diff")
-	set_keymap(buf, maps.refresh, M.refresh, "Refresh Chunk diff")
 	set_file_navigation_keymaps(buf, maps, function()
 		M.select_relative_file(1)
 	end, function()
@@ -685,11 +687,77 @@ local function start_collection(state, start_dir, opts)
 	end)
 end
 
+local function refresh_state(state, opts)
+	if state.closed or not valid_buf(state.diff_buf) then
+		return
+	end
+
+	opts = opts or {}
+	local current_buf = vim.api.nvim_get_current_buf()
+	local current_win = vim.api.nvim_get_current_win()
+	local current_is_files_panel = current_buf == state.files_buf
+	local files_cursor = current_is_files_panel and vim.api.nvim_win_get_cursor(0)[1] or nil
+	local selected_identity = current_is_files_panel and file_identity_at_panel_row(state, files_cursor) or nil
+	local diff_cursor = valid_win(state.diff_win) and vim.api.nvim_win_get_cursor(state.diff_win) or { 1, 0 }
+	local diff_selection = opts.selection
+		or selection_identity_for_line(state.line_map[diff_cursor[1]])
+		or state.selected_file_identity
+	start_collection(state, state.root, {
+		current_is_files_panel = current_is_files_panel,
+		current_win = current_win,
+		files_cursor = files_cursor,
+		selected_identity = selected_identity,
+		diff_cursor = diff_cursor,
+		diff_selection = diff_selection,
+	})
+end
+
+local function schedule_auto_refresh(state)
+	if not state or state.closed or not active_views[state] then
+		return
+	end
+
+	state.auto_refresh_generation = state.auto_refresh_generation + 1
+	local generation = state.auto_refresh_generation
+	vim.defer_fn(function()
+		if state.auto_refresh_generation ~= generation or state.closed or not active_views[state] then
+			return
+		end
+		refresh_state(state)
+	end, 100)
+end
+
+local auto_refresh_autocmds_created = false
+local function ensure_auto_refresh_autocmds()
+	if auto_refresh_autocmds_created then
+		return
+	end
+	auto_refresh_autocmds_created = true
+
+	vim.api.nvim_create_autocmd({ "BufWritePost", "FocusGained", "ShellCmdPost", "TermClose" }, {
+		group = augroup,
+		desc = "Refresh open Chunk views after Git may have changed",
+		callback = function()
+			for state in pairs(active_views) do
+				schedule_auto_refresh(state)
+			end
+		end,
+	})
+	vim.api.nvim_create_autocmd("WinEnter", {
+		group = augroup,
+		desc = "Refresh a Chunk view when returning to it",
+		callback = function(args)
+			schedule_auto_refresh(states[args.buf])
+		end,
+	})
+end
+
 function M.setup(opts)
 	config.setup(opts)
 end
 
 function M.open(args)
+	ensure_auto_refresh_autocmds()
 	local spec, spec_err = diff_spec.parse(args)
 	if not spec then
 		notify("Invalid :Chunk arguments: " .. spec_err, vim.log.levels.ERROR)
@@ -717,7 +785,9 @@ function M.open(args)
 		collapsed_directories = {},
 		selected_file_index = nil,
 		selected_file_identity = nil,
+		auto_refresh_generation = 0,
 	}
+	active_views[state] = true
 
 	state.file_display = selected_file.new({
 		win = state.diff_win,
@@ -733,9 +803,7 @@ function M.open(args)
 			notify(message, vim.log.levels.WARN)
 		end,
 		on_write = function()
-			if not state.closed then
-				M.refresh()
-			end
+			schedule_auto_refresh(state)
 		end,
 	})
 	if valid_buf(state.files_buf) then
@@ -765,23 +833,7 @@ function M.refresh(opts)
 		return
 	end
 
-	local current_buf = vim.api.nvim_get_current_buf()
-	local current_win = vim.api.nvim_get_current_win()
-	local current_is_files_panel = current_buf == state.files_buf
-	local files_cursor = current_is_files_panel and vim.api.nvim_win_get_cursor(0)[1] or nil
-	local selected_identity = current_is_files_panel and file_identity_at_panel_row(state, files_cursor) or nil
-	local diff_cursor = valid_win(state.diff_win) and vim.api.nvim_win_get_cursor(state.diff_win) or { 1, 0 }
-	local diff_selection = opts.selection
-		or selection_identity_for_line(state.line_map[diff_cursor[1]])
-		or state.selected_file_identity
-	start_collection(state, state.root, {
-		current_is_files_panel = current_is_files_panel,
-		current_win = current_win,
-		files_cursor = files_cursor,
-		selected_identity = selected_identity,
-		diff_cursor = diff_cursor,
-		diff_selection = diff_selection,
-	})
+	refresh_state(state, opts)
 end
 
 function M.select_file_at_cursor()

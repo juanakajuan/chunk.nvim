@@ -10,9 +10,3 @@ end, {
 	desc = "Open Chunk inline git diff view",
 	nargs = "*",
 })
-
-vim.api.nvim_create_user_command("ChunkRefresh", function()
-	require("chunk").refresh()
-end, {
-	desc = "Refresh the current Chunk diff view",
-})
