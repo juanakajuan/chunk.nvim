@@ -145,7 +145,43 @@ local function child_path(parent, name)
 	return parent .. "/" .. name
 end
 
+local function sort_files(node)
+	table.sort(node.files, function(left, right)
+		if left.name == right.name then
+			return left.file.file_index < right.file.file_index
+		end
+		return left.name < right.name
+	end)
+end
+
+local function first_file_index(node)
+	sort_files(node)
+	if node.files[1] then
+		return node.files[1].file.file_index
+	end
+
+	for _, name in ipairs(sorted_keys(node.directories)) do
+		local index = first_file_index(node.directories[name])
+		if index then
+			return index
+		end
+	end
+end
+
 local function flatten_tree(items, node, section, parent_path, depth, collapsed_directories)
+	sort_files(node)
+
+	for _, entry in ipairs(node.files) do
+		table.insert(items, {
+			kind = "file",
+			section = section.id,
+			name = entry.name,
+			depth = depth,
+			file_index = entry.file.file_index,
+			file = entry.file,
+		})
+	end
+
 	for _, name in ipairs(sorted_keys(node.directories)) do
 		local child = node.directories[name]
 		local path = child_path(parent_path, name)
@@ -161,29 +197,12 @@ local function flatten_tree(items, node, section, parent_path, depth, collapsed_
 			depth = depth,
 			expanded = expanded,
 			file_indices = child.file_indices,
+			preview_file_index = first_file_index(child),
 		})
 
 		if expanded then
 			flatten_tree(items, child, section, path, depth + 1, collapsed_directories)
 		end
-	end
-
-	table.sort(node.files, function(left, right)
-		if left.name == right.name then
-			return left.file.file_index < right.file.file_index
-		end
-		return left.name < right.name
-	end)
-
-	for _, entry in ipairs(node.files) do
-		table.insert(items, {
-			kind = "file",
-			section = section.id,
-			name = entry.name,
-			depth = depth,
-			file_index = entry.file.file_index,
-			file = entry.file,
-		})
 	end
 end
 
@@ -202,7 +221,23 @@ function M.build(sections, collapsed_directories)
 		for _, file in ipairs(section.files or {}) do
 			insert_file(root, file)
 		end
-		flatten_tree(items, root, section, "", 0, collapsed_directories)
+
+		local root_key = directory_key(section.id, "")
+		local root_expanded = collapsed_directories[root_key] ~= true
+		table.insert(items, {
+			kind = "folder",
+			section = section.id,
+			name = "",
+			path = "",
+			key = root_key,
+			depth = 0,
+			expanded = root_expanded,
+			file_indices = root.file_indices,
+			preview_file_index = first_file_index(root),
+		})
+		if root_expanded then
+			flatten_tree(items, root, section, "", 1, collapsed_directories)
+		end
 	end
 
 	return items
@@ -375,7 +410,8 @@ local function render_folder(item, selected_index, width)
 	local folder_highlight = item.section == "staged" and "ChunkSidebarStaged" or "ChunkSidebarFolder"
 	append(builder, folder_icon, folder_highlight)
 	append(builder, " ")
-	append(builder, truncate_to_width(item.name .. "/", width - builder.display_width), folder_highlight)
+	local name = item.path == "" and "/" or item.name .. "/"
+	append(builder, truncate_to_width(name, width - builder.display_width), folder_highlight)
 	return finish(builder, selected)
 end
 

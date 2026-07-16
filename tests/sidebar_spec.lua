@@ -73,17 +73,18 @@ local function item_summary(items)
 	return summary
 end
 
-local function test_builds_directory_first_tree()
+local function test_builds_rooted_file_first_tree()
 	local items = sidebar.build(sections)
 	assert_equal(item_summary(items), {
 		{ kind = "section_heading" },
-		{ kind = "folder", name = "lua", depth = 0 },
-		{ kind = "folder", name = "chunk", depth = 1 },
-		{ kind = "file", name = "init.lua", depth = 2 },
-		{ kind = "file", name = "render.lua", depth = 2 },
-		{ kind = "folder", name = "tests", depth = 0 },
-		{ kind = "file", name = "view_spec.lua", depth = 1 },
-		{ kind = "file", name = "README.md", depth = 0 },
+		{ kind = "folder", name = "", depth = 0 },
+		{ kind = "file", name = "README.md", depth = 1 },
+		{ kind = "folder", name = "lua", depth = 1 },
+		{ kind = "folder", name = "chunk", depth = 2 },
+		{ kind = "file", name = "init.lua", depth = 3 },
+		{ kind = "file", name = "render.lua", depth = 3 },
+		{ kind = "folder", name = "tests", depth = 1 },
+		{ kind = "file", name = "view_spec.lua", depth = 2 },
 	}, "directory tree order")
 end
 
@@ -94,22 +95,23 @@ local function test_collapsed_folder_hides_children_and_carries_selection()
 	local items = sidebar.build(sections, collapsed)
 	assert_equal(item_summary(items), {
 		{ kind = "section_heading" },
-		{ kind = "folder", name = "lua", depth = 0 },
-		{ kind = "folder", name = "tests", depth = 0 },
-		{ kind = "file", name = "view_spec.lua", depth = 1 },
-		{ kind = "file", name = "README.md", depth = 0 },
+		{ kind = "folder", name = "", depth = 0 },
+		{ kind = "file", name = "README.md", depth = 1 },
+		{ kind = "folder", name = "lua", depth = 1 },
+		{ kind = "folder", name = "tests", depth = 1 },
+		{ kind = "file", name = "view_spec.lua", depth = 2 },
 	}, "collapsed tree")
 
 	local rendered = sidebar.render(items, 2, 28)
-	assert(rendered[2].selected, "collapsed ancestor represents its hidden selected file")
-	assert_match(rendered[2].text, "^▸ .+ lua/$", "collapsed folder appearance")
+	assert(rendered[4].selected, "collapsed ancestor represents its hidden selected file")
+	assert_match(rendered[4].text, "^  ▸ .+ lua/$", "collapsed folder appearance")
 end
 
 local function test_renders_icons_and_right_aligned_stats()
 	local items = sidebar.build(sections)
 	local rendered = sidebar.render(items, 1, 28)
-	local readme = rendered[#rendered]
-	assert_match(readme.text, "^   README%.md%s+%+3 %-1$", "file icon and stats")
+	local readme = rendered[3]
+	assert_match(readme.text, "^     README%.md%s+%+3 %-1$", "file icon and stats")
 	assert_equal(vim.fn.strdisplaywidth(readme.text), 28, "stats align to panel edge")
 	assert(readme.selected, "selected file row is marked")
 
@@ -119,7 +121,7 @@ local function test_renders_icons_and_right_aligned_stats()
 end
 
 local tests = {
-	test_builds_directory_first_tree,
+	test_builds_rooted_file_first_tree,
 	test_collapsed_folder_hides_children_and_carries_selection,
 	test_renders_icons_and_right_aligned_stats,
 }

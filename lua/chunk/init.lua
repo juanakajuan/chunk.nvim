@@ -236,7 +236,8 @@ local function render_files_panel(state)
 	local panel = config.options.files_panel
 	local configured_width = type(panel) == "table" and tonumber(panel.width) or 34
 	local width = valid_win(state.files_win) and vim.api.nvim_win_get_width(state.files_win) or configured_width
-	render.render_files(state.files_buf, state.panel_items, state.selected_file_index, width)
+	local highlighted_index = state.panel_selection_visible and state.selected_file_index or nil
+	render.render_files(state.files_buf, state.panel_items, highlighted_index, width)
 	set_buffer_state(state.files_buf, state)
 end
 
@@ -247,6 +248,7 @@ local function render_model_into_view(state, model)
 	state.panel_sections = model.panel_sections
 	state.selected_file_index = nil
 	state.selected_file_identity = nil
+	state.panel_selection_visible = false
 
 	selected_file.show(state.file_display, { lines = model.lines })
 
@@ -282,6 +284,22 @@ local function file_index_at_panel_row(state, row)
 	return item and item.kind == "file" and item.file_index or nil
 end
 
+local function first_panel_entry(state)
+	for row, item in ipairs(state.panel_items) do
+		if item.kind == "folder" or item.kind == "file" then
+			return row, item
+		end
+	end
+end
+
+local function first_panel_file_index(state)
+	for _, item in ipairs(state.panel_items) do
+		if item.kind == "file" then
+			return item.file_index
+		end
+	end
+end
+
 local function set_selected_file(state, index)
 	local file = index and state.file_items[index] or nil
 
@@ -305,6 +323,7 @@ local function select_file(state, index, opts)
 	end
 
 	set_selected_file(state, index)
+	state.panel_selection_visible = opts.highlight_selection ~= false
 	state.line_map = file.rendered_lines
 	local source_backed = selected_file.show(state.file_display, {
 		root = state.root,
@@ -314,7 +333,9 @@ local function select_file(state, index, opts)
 	})
 	render_files_panel(state)
 
-	set_cursor_row(state.files_win, state.files_buf, file.panel_row)
+	if opts.position_files_cursor ~= false then
+		set_cursor_row(state.files_win, state.files_buf, file.panel_row)
+	end
 
 	if not source_backed and valid_win(state.diff_win) and valid_buf(state.diff_buf) then
 		set_cursor_row(state.diff_win, state.diff_buf, file.header_row)
@@ -330,7 +351,35 @@ local function select_file(state, index, opts)
 	return source_backed
 end
 
+local function preview_panel_item(state, row)
+	local item = row and state.panel_items[row] or nil
+	if not item or (item.kind ~= "file" and item.kind ~= "folder") then
+		return
+	end
+
+	local index = item.kind == "file" and item.file_index or item.preview_file_index
+	local highlight_selection = item.kind == "file"
+	if not index
+		or (index == state.selected_file_index and highlight_selection == state.panel_selection_visible)
+	then
+		return
+	end
+
+	select_file(state, index, {
+		focus_diff = false,
+		highlight_selection = highlight_selection,
+		position_files_cursor = false,
+	})
+	set_cursor_row(state.files_win, state.files_buf, row)
+end
+
 local function restore_files_panel_selection(state, row, identity)
+	local cursor_item = row and state.panel_items[math.min(row, #state.panel_items)] or nil
+	if cursor_item and cursor_item.kind == "folder" then
+		preview_panel_item(state, math.min(row, #state.panel_items))
+		return
+	end
+
 	local selected = file_index_for_identity(state, identity)
 	if not selected and row and #state.panel_items > 0 then
 		local clamped_row = math.min(row, #state.panel_items)
@@ -641,6 +690,25 @@ local function apply_autocmds(state)
 			})
 		end
 	end
+
+	if valid_buf(state.files_buf) then
+		vim.api.nvim_create_autocmd("CursorMoved", {
+			group = augroup,
+			buffer = state.files_buf,
+			desc = "Show the changed file under the files-panel cursor",
+			callback = function()
+				vim.schedule(function()
+					local current = states[state.files_buf]
+					if not current or current.closed or vim.api.nvim_get_current_buf() ~= current.files_buf then
+						return
+					end
+
+					local row = vim.api.nvim_win_get_cursor(0)[1]
+					preview_panel_item(current, row)
+				end)
+			end,
+		})
+	end
 end
 
 local function start_collection(state, start_dir, opts)
@@ -672,8 +740,17 @@ local function start_collection(state, start_dir, opts)
 			state.mutable = collected.mutable
 			render_model_into_view(state, render_model_for_changes(collected))
 			if opts.initial then
-				if #state.file_items > 0 then
-					select_file(state, 1, { focus_diff = false })
+				local first_row = first_panel_entry(state)
+				local initial_index = first_panel_file_index(state) or 1
+				if state.file_items[initial_index] then
+					select_file(state, initial_index, {
+						focus_diff = false,
+						highlight_selection = false,
+						position_files_cursor = false,
+					})
+				end
+				if first_row then
+					set_cursor_row(state.files_win, state.files_buf, first_row)
 				end
 				return
 			end
@@ -713,7 +790,7 @@ local function refresh_state(state, opts)
 end
 
 local function schedule_auto_refresh(state)
-	if not state or state.closed or not active_views[state] then
+	if not state or state.closed or state.initializing or not active_views[state] then
 		return
 	end
 
@@ -785,7 +862,9 @@ function M.open(args)
 		collapsed_directories = {},
 		selected_file_index = nil,
 		selected_file_identity = nil,
+		panel_selection_visible = false,
 		auto_refresh_generation = 0,
+		initializing = true,
 	}
 	active_views[state] = true
 
@@ -822,7 +901,12 @@ function M.open(args)
 	apply_autocmds(state)
 	start_collection(state, start_dir, { initial = true })
 
-	focus_window(state.diff_win)
+	if valid_win(state.files_win) then
+		focus_window(state.files_win)
+	else
+		focus_window(state.diff_win)
+	end
+	state.initializing = false
 end
 
 function M.refresh(opts)

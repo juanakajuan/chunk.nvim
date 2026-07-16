@@ -54,10 +54,11 @@ read-only comparison, do not synthesize untracked files, and do not provide the
 stage or unstage actions. The active revision and pathspecs are shown in the
 view and retained as it updates.
 
-- `:Chunk` opens the inline diff view using the syntax above.
+- `:Chunk` opens the inline diff view with initial focus on the sidebar's `/` root.
 - `<CR>` opens the real file at the diff line.
 - The diff pane shows only the file selected in the files sidebar.
-- `<CR>` in the files sidebar selects a changed file and shows its diff.
+- Moving the cursor in the files sidebar selects a changed file and shows its diff.
+- `<CR>` in the files sidebar focuses the selected file's diff.
 - `s` stages the tracked text hunk under the cursor from `Changes`.
 - `u` unstages the tracked text hunk under the cursor from `Staged Changes`.
 - `]h` and `[h` jump between hunks.
@@ -101,9 +102,10 @@ or shell commands finish, and you return to a Chunk window. Staging and
 unstaging operate on the index only. Untracked files and binary changes are
 displayed but do not support hunk actions.
 
-The files sidebar groups paths into an expandable directory tree and shows
-file-type icons with per-file addition and deletion totals. Press `<CR>` on a
-folder to collapse or expand it. The icons are designed for a Nerd Font.
+The files sidebar groups paths under an expandable `/` root and shows file-type
+icons with per-file addition and deletion totals. A folder previews its first
+changed descendant while keeping the folder selected. Press `<CR>` on a folder
+to collapse or expand it. The icons are designed for a Nerd Font.
 
 ## Source-backed mode
 

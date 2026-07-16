@@ -181,22 +181,23 @@ local function test_chunk_command_renders_filtered_revision_range()
 		assert_contains(diff_lines, "+return 'feature'", "matching revision content")
 		assert_lines_exclude(diff_lines, "outside/ignored.lua", "outside revision path is filtered")
 		assert_lines_exclude(diff_lines, "inside/current-only.lua", "working-tree files are excluded")
-		assert_equal(#file_lines, 3, "filtered revision file row count")
-		assert(file_lines[2]:match("inside/$"), "matching directory is rendered")
-		assert(file_lines[3]:match("selected%.lua%s+%+1$"), "matching revision file is rendered")
+		assert_equal(#file_lines, 4, "filtered revision file row count")
+		assert(file_lines[2]:match("/$"), "repository root is rendered")
+		assert(file_lines[3]:match("inside/$"), "matching directory is rendered")
+		assert(file_lines[4]:match("selected%.lua%s+%+1$"), "matching revision file is rendered")
 
 		vim.api.nvim_set_current_win(files_win)
 		vim.api.nvim_win_set_cursor(files_win, { 2, 0 })
 		chunk.select_file_at_cursor()
 		file_lines = window_lines(files_win)
-		assert_equal(#file_lines, 2, "collapsed directory hides its files")
-		assert(file_lines[2]:match("^▸ .+ inside/$"), "collapsed directory uses a closed chevron")
+		assert_equal(#file_lines, 2, "collapsed root hides all files")
+		assert(file_lines[2]:match("^▸ .+ /$"), "collapsed root uses a closed chevron")
 		assert_equal(vim.api.nvim_get_current_win(), files_win, "folder toggle keeps sidebar focus")
 
 		chunk.select_file_at_cursor()
 		file_lines = window_lines(files_win)
-		assert_equal(#file_lines, 3, "expanded directory restores its files")
-		assert(file_lines[2]:match("^▾ .+ inside/$"), "expanded directory uses an open chevron")
+		assert_equal(#file_lines, 4, "expanded root restores its files")
+		assert(file_lines[2]:match("^▾ .+ /$"), "expanded root uses an open chevron")
 
 		chunk.close()
 	end)
@@ -320,7 +321,7 @@ local function test_invalid_revision_preserves_existing_chunk_view()
 			"Chunk collection completed"
 		)
 		local diff_win = assert(find_chunk_windows(), "working-tree diff window exists")
-		local diff_buf = vim.api.nvim_win_get_buf(diff_win)
+		local current_buf = vim.api.nvim_get_current_buf()
 		local rendered_before = table.concat(window_lines(diff_win), "\n")
 		local tab_count = #vim.api.nvim_list_tabpages()
 
@@ -334,7 +335,7 @@ local function test_invalid_revision_preserves_existing_chunk_view()
 			"Git rejected revision or range",
 			"existing view uses its repository"
 		)
-		assert_equal(vim.api.nvim_get_current_buf(), diff_buf, "invalid revision preserves Chunk buffer")
+		assert_equal(vim.api.nvim_get_current_buf(), current_buf, "invalid revision preserves Chunk buffer")
 		assert_equal(
 			table.concat(window_lines(diff_win), "\n"),
 			rendered_before,
