@@ -181,7 +181,10 @@ local function test_files_panel_selects_file_diff()
 			return false
 		end, 10)
 		assert_equal(vim.api.nvim_win_get_cursor(files_win)[1], 2, "files panel starts on its first tree entry")
-		assert(not has_line_highlight(vim.api.nvim_win_get_buf(files_win), "ChunkFileSelected"), "root owns initial selection")
+		assert(
+			not has_line_highlight(vim.api.nvim_win_get_buf(files_win), "ChunkFileSelected"),
+			"root owns initial selection"
+		)
 
 		local file_lines = window_lines(files_win)
 		assert_equal(#file_lines, 5, "files panel line count")
@@ -203,13 +206,19 @@ local function test_files_panel_selects_file_diff()
 
 		vim.cmd.normal({ "2j", bang = true })
 		vim.api.nvim_exec_autocmds("CursorMoved", { buffer = vim.api.nvim_win_get_buf(files_win) })
-		assert(vim.wait(1000, function()
-			return current_window_line(diff_win):match("b%.txt") ~= nil
-		end), "folder navigation previews its first nested file")
+		assert(
+			vim.wait(1000, function()
+				return current_window_line(diff_win):match("b%.txt") ~= nil
+			end),
+			"folder navigation previews its first nested file"
+		)
 
 		assert_equal(vim.api.nvim_get_current_win(), files_win, "cursor navigation keeps sidebar focus")
 		assert_equal(vim.api.nvim_win_get_cursor(files_win)[1], 4, "cursor remains on the nested folder")
-		assert(not has_line_highlight(vim.api.nvim_win_get_buf(files_win), "ChunkFileSelected"), "folder owns selection")
+		assert(
+			not has_line_highlight(vim.api.nvim_win_get_buf(files_win), "ChunkFileSelected"),
+			"folder owns selection"
+		)
 
 		vim.cmd.normal({ "j", bang = true })
 		vim.api.nvim_exec_autocmds("CursorMoved", { buffer = vim.api.nvim_win_get_buf(files_win) })
@@ -230,9 +239,12 @@ local function test_files_panel_selects_file_diff()
 		vim.api.nvim_set_current_win(files_win)
 		vim.cmd.normal({ "2k", bang = true })
 		vim.api.nvim_exec_autocmds("CursorMoved", { buffer = vim.api.nvim_win_get_buf(files_win) })
-		assert(vim.wait(1000, function()
-			return current_window_line(diff_win):match("a%.txt") ~= nil
-		end), "cursor navigation updates the next file diff")
+		assert(
+			vim.wait(1000, function()
+				return current_window_line(diff_win):match("a%.txt") ~= nil
+			end),
+			"cursor navigation updates the next file diff"
+		)
 		assert_equal(vim.api.nvim_win_get_cursor(files_win)[1], 3, "cursor moves to the root changed file")
 		assert_match(current_window_line(diff_win), "a%.txt", "cursor navigation updates the diff")
 
@@ -258,8 +270,11 @@ local function test_staged_and_unstaged_sections_distinguish_same_path()
 
 		local file_lines = window_lines(files_win)
 		local diff_buf = vim.api.nvim_win_get_buf(diff_win)
+		local files_buf = vim.api.nvim_win_get_buf(files_win)
 		assert_equal(buffer_keymap(diff_buf, "s").desc, "Stage hunk", "default stage mapping")
 		assert_equal(buffer_keymap(diff_buf, "u").desc, "Unstage hunk", "default unstage mapping")
+		assert_equal(buffer_keymap(files_buf, "s").desc, "Stage file", "default sidebar stage mapping")
+		assert_equal(buffer_keymap(files_buf, "u").desc, "Unstage file", "default sidebar unstage mapping")
 		assert_equal(file_lines[1], "Changes", "unstaged files section heading")
 		assert_match(file_lines[2], "^▾ .+ /$", "unstaged root row")
 		assert_match(file_lines[3], "^     shared%.txt%s+%+1 %-1$", "unstaged file row")

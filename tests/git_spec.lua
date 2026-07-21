@@ -190,7 +190,28 @@ local function test_cancel_stops_execution_and_suppresses_late_results()
 	assert_equal(cancellation_count, 1, "cancellation is idempotent")
 end
 
+local function test_status_inventory_preserves_renames_and_unusual_paths()
+	local output = table.concat({
+		"R  new -> name\t.txt",
+		"old name.txt",
+		" M :(literal)*.lua",
+		"?? line\nbreak.bin",
+		"",
+	}, "\0")
+	local inventory = git.parse_status_inventory(output)
+
+	assert_equal(#inventory.staged, 1, "staged inventory count")
+	assert_equal(inventory.staged[1].path, "new -> name\t.txt", "rename destination is exact")
+	assert_equal(inventory.staged[1].old_path, "old name.txt", "rename source is exact")
+	assert_equal(inventory.staged[1].status, "renamed", "rename status")
+	assert_equal(#inventory.unstaged, 2, "unstaged inventory count")
+	assert_equal(inventory.unstaged[1].path, ":(literal)*.lua", "pathspec-like path is exact")
+	assert_equal(inventory.unstaged[2].path, "line\nbreak.bin", "newline path is exact")
+	assert(inventory.unstaged[2].untracked, "untracked status is retained")
+end
+
 test_working_tree_pathspec_filters_tracked_and_untracked_files()
 test_revision_range_collects_one_filtered_readonly_comparison()
 test_cancel_stops_execution_and_suppresses_late_results()
-print("ok 3 tests")
+test_status_inventory_preserves_renames_and_unusual_paths()
+print("ok 4 tests")

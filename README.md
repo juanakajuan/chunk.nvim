@@ -59,6 +59,8 @@ view and retained as it updates.
 - The diff pane shows only the file selected in the files sidebar.
 - Moving the cursor in the files sidebar selects a changed file and shows its diff.
 - `<CR>` in the files sidebar focuses the selected file's diff.
+- `s` in the files sidebar stages the selected modified, deleted, untracked, or binary file.
+- `u` in the files sidebar unstages the selected staged file without changing the working tree.
 - `s` stages the tracked text hunk under the cursor from `Changes`.
 - `u` unstages the tracked text hunk under the cursor from `Staged Changes`.
 - `]h` and `[h` jump between hunks.
@@ -99,8 +101,8 @@ require("chunk").setup({
 Set any mapping to `false` or an empty string to disable it. Open Chunk views
 refresh automatically after files are written, Neovim regains focus, terminal
 or shell commands finish, and you return to a Chunk window. Staging and
-unstaging operate on the index only. Untracked files and binary changes are
-displayed but do not support hunk actions.
+unstaging operate on the index only. Untracked files and binary changes support
+whole-file staging from the sidebar, but do not support hunk actions.
 
 The files sidebar groups paths under an expandable `/` root and shows file-type
 icons with per-file addition and deletion totals. A folder previews its first

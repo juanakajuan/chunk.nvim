@@ -217,7 +217,7 @@ local function revision_collection(root, spec, comparison)
 	}
 end
 
-local function working_tree_collection(root, spec, unstaged, staged)
+local function working_tree_collection(root, spec, unstaged, staged, inventory)
 	local description = diff_spec.describe(spec)
 	local changes_title = "Changes"
 	local staged_title = "Staged Changes"
@@ -233,12 +233,77 @@ local function working_tree_collection(root, spec, unstaged, staged)
 		spec = spec,
 		description = description,
 		mutable = diff_spec.is_mutable(spec),
+		inventory = inventory,
 		empty_message = empty_message,
 		sections = {
 			{ id = "unstaged", title = changes_title, diff = unstaged },
 			{ id = "staged", title = staged_title, diff = staged },
 		},
 	}
+end
+
+local status_by_code = {
+	["?"] = "added",
+	A = "added",
+	C = "added",
+	D = "deleted",
+	M = "modified",
+	R = "renamed",
+	T = "modified",
+	U = "modified",
+}
+
+local function inventory_file(path, old_path, code)
+	return {
+		path = path,
+		old_path = old_path,
+		status = status_by_code[code] or "modified",
+		untracked = code == "?",
+	}
+end
+
+local function is_rename(code)
+	return code == "R" or code == "C"
+end
+
+local function is_changed(code)
+	return code ~= " " and code ~= "!"
+end
+
+function M.parse_status_inventory(output)
+	local inventory = {
+		unstaged = {},
+		staged = {},
+	}
+	local unstaged_tracked = {}
+	local untracked = {}
+	local fields = vim.split(output, "\0", { plain = true, trimempty = true })
+	local index = 1
+
+	while index <= #fields do
+		local entry = fields[index]
+		local x = entry:sub(1, 1)
+		local y = entry:sub(2, 2)
+		local path = entry:sub(4)
+		local renamed = is_rename(x) or is_rename(y)
+		local old_path = renamed and fields[index + 1] or nil
+		index = index + (renamed and 2 or 1)
+
+		if x == "?" and y == "?" then
+			table.insert(untracked, inventory_file(path, nil, "?"))
+		else
+			if is_changed(x) then
+				table.insert(inventory.staged, inventory_file(path, old_path, x))
+			end
+			if is_changed(y) then
+				table.insert(unstaged_tracked, inventory_file(path, old_path, y))
+			end
+		end
+	end
+
+	vim.list_extend(inventory.unstaged, unstaged_tracked)
+	vim.list_extend(inventory.unstaged, untracked)
+	return inventory
 end
 
 ---Collect repository changes without blocking Neovim.
@@ -291,8 +356,8 @@ function M.collect(opts, callback)
 	local context_lines = opts.context_lines or 3
 	local start_dir = opts.start_dir or M.current_start_dir()
 
-	local function assemble(root, unstaged, staged)
-		finish(working_tree_collection(root, spec, unstaged, staged), nil)
+	local function finish_working_tree(root, unstaged, staged, inventory)
+		finish(working_tree_collection(root, spec, unstaged, staged, inventory), nil)
 	end
 
 	local function collect_untracked(root, done)
@@ -330,6 +395,55 @@ function M.collect(opts, callback)
 		end)
 	end
 
+	local function collect_staged(root, unstaged, inventory)
+		git(root, M.diff_argv(spec, context_lines, true), function(staged, err)
+			if not staged then
+				finish(nil, err)
+				return
+			end
+			if opts.include_untracked == false then
+				finish_working_tree(root, unstaged, staged, inventory)
+				return
+			end
+
+			collect_untracked(root, function(untracked, untracked_err)
+				if not untracked then
+					finish(nil, untracked_err)
+					return
+				end
+				finish_working_tree(root, unstaged .. untracked, staged, inventory)
+			end)
+		end)
+	end
+
+	local function collect_unstaged(root, inventory)
+		git(root, M.diff_argv(spec, context_lines, false), function(unstaged, err)
+			if not unstaged then
+				finish(nil, err)
+				return
+			end
+			collect_staged(root, unstaged, inventory)
+		end)
+	end
+
+	local function collect_working_tree(root)
+		local argv = {
+			"status",
+			"--porcelain=v1",
+			"-z",
+			"--untracked-files=" .. (opts.include_untracked == false and "no" or "all"),
+			"--",
+		}
+		vim.list_extend(argv, spec.pathspecs or {})
+		git(root, argv, function(status, err)
+			if not status then
+				finish(nil, err)
+				return
+			end
+			collect_unstaged(root, M.parse_status_inventory(status))
+		end)
+	end
+
 	git(start_dir, { "rev-parse", "--show-toplevel" }, function(root_out, root_err)
 		if not root_out then
 			finish(nil, root_err)
@@ -347,29 +461,7 @@ function M.collect(opts, callback)
 			return
 		end
 
-		git(root, M.diff_argv(spec, context_lines, false), function(unstaged, unstaged_err)
-			if not unstaged then
-				finish(nil, unstaged_err)
-				return
-			end
-			git(root, M.diff_argv(spec, context_lines, true), function(staged, staged_err)
-				if not staged then
-					finish(nil, staged_err)
-					return
-				end
-				if opts.include_untracked == false then
-					assemble(root, unstaged, staged)
-					return
-				end
-				collect_untracked(root, function(untracked, untracked_err)
-					if not untracked then
-						finish(nil, untracked_err)
-						return
-					end
-					assemble(root, unstaged .. untracked, staged)
-				end)
-			end)
-		end)
+		collect_working_tree(root)
 	end)
 
 	return {
@@ -412,6 +504,24 @@ end
 
 function M.unstage_hunk(root, patch)
 	return apply_cached_patch(root, patch, true)
+end
+
+local function run_file_command(root, command, paths)
+	local argv = { "--literal-pathspecs" }
+	vim.list_extend(argv, command)
+	table.insert(argv, "--")
+	vim.list_extend(argv, paths)
+
+	local _, err = run_git(root, argv)
+	return err and nil or true, err
+end
+
+function M.stage_file(root, paths)
+	return run_file_command(root, { "add", "-A" }, paths)
+end
+
+function M.unstage_file(root, paths)
+	return run_file_command(root, { "reset", "-q", "HEAD" }, paths)
 end
 
 return M

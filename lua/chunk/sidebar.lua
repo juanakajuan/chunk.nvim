@@ -110,8 +110,9 @@ local function path_parts(path)
 end
 
 local function insert_file(root, file)
-	local parts = path_parts(file.path)
-	local name = table.remove(parts) or file.path
+	local sidebar_path = file.display_path or file.path
+	local parts = path_parts(sidebar_path)
+	local name = table.remove(parts) or sidebar_path
 	local node = root
 	node.file_indices[file.file_index] = true
 

@@ -37,8 +37,8 @@ local function run(argv, cwd)
 	return result.stdout or ""
 end
 
-local function write_file(path, lines)
-	vim.fn.writefile(lines, path)
+local function write_file(path, lines, flags)
+	vim.fn.writefile(lines, path, flags or "")
 end
 
 local function read_file(path)
@@ -83,10 +83,10 @@ local function with_repo(fn)
 	end
 end
 
-local function find_diff_window()
+local function find_window(filetype)
 	for _, win in ipairs(vim.api.nvim_tabpage_list_wins(vim.api.nvim_get_current_tabpage())) do
 		local buf = vim.api.nvim_win_get_buf(win)
-		if vim.api.nvim_get_option_value("filetype", { buf = buf }) == "diff" then
+		if vim.api.nvim_get_option_value("filetype", { buf = buf }) == filetype then
 			return win
 		end
 	end
@@ -96,6 +96,15 @@ local function find_line(win, text)
 	local buf = vim.api.nvim_win_get_buf(win)
 	for row, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
 		if line == text then
+			return row
+		end
+	end
+end
+
+local function find_line_containing(win, text)
+	local buf = vim.api.nvim_win_get_buf(win)
+	for row, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+		if line:find(text, 1, true) then
 			return row
 		end
 	end
@@ -124,6 +133,15 @@ local function capture_notification(fn)
 	return notification
 end
 
+local function wait_for_refresh(message)
+	assert(
+		vim.wait(5000, function()
+			return not chunk.is_collecting()
+		end, 10),
+		message
+	)
+end
+
 local function open_chunk_view(root, selected_line)
 	chunk.setup({
 		context_lines = 1,
@@ -131,17 +149,14 @@ local function open_chunk_view(root, selected_line)
 	})
 	vim.cmd.edit(vim.fn.fnameescape(root .. "/shared.txt"))
 	chunk.open()
-	assert(
-		vim.wait(5000, function()
-			return not chunk.is_collecting()
-		end, 10),
-		"Chunk collection completed"
-	)
+	wait_for_refresh("Chunk collection completed")
 
-	local diff_win = assert(find_diff_window(), "diff window was not opened")
-	local row = assert(find_line(diff_win, selected_line), "selected line was not rendered")
-	vim.api.nvim_set_current_win(diff_win)
-	vim.api.nvim_win_set_cursor(diff_win, { row, 0 })
+	local diff_win = assert(find_window("diff"), "diff window was not opened")
+	if selected_line then
+		local row = assert(find_line(diff_win, selected_line), "selected line was not rendered")
+		vim.api.nvim_set_current_win(diff_win)
+		vim.api.nvim_win_set_cursor(diff_win, { row, 0 })
+	end
 	return diff_win
 end
 
@@ -155,12 +170,7 @@ local function test_stage_and_unstage_hunk_update_only_index_and_follow_selectio
 
 		local diff_win = open_chunk_view(root, "+unstaged line 16")
 		chunk.stage_hunk()
-		assert(
-			vim.wait(5000, function()
-				return not chunk.is_collecting()
-			end, 10),
-			"Chunk refresh completed"
-		)
+		wait_for_refresh("Chunk refresh completed")
 
 		assert_equal(read_file(root .. "/shared.txt"), working_before, "staging leaves working file unchanged")
 		local index_after_stage = run({ "git", "show", ":shared.txt" }, root)
@@ -184,12 +194,7 @@ local function test_stage_and_unstage_hunk_update_only_index_and_follow_selectio
 		assert_contains(nearby, "unstaged line 16", "selection follows the staged hunk")
 
 		chunk.unstage_hunk()
-		assert(
-			vim.wait(5000, function()
-				return not chunk.is_collecting()
-			end, 10),
-			"Chunk refresh completed"
-		)
+		wait_for_refresh("Chunk refresh completed")
 
 		assert_equal(read_file(root .. "/shared.txt"), working_before, "unstaging leaves working file unchanged")
 		assert_equal(
@@ -258,6 +263,50 @@ local function test_rejected_patch_reports_git_error_without_refreshing()
 	end)
 end
 
+local function test_sidebar_stages_binary_unusual_path_and_preserves_selection()
+	with_repo(function(root)
+		local relative_path = ":(literal)* odd\tfile.bin"
+		local full_path = root .. "/" .. relative_path
+		-- writefile() encodes embedded newlines as NUL bytes.
+		local binary_contents = "binary\ncontents"
+		write_file(full_path, { binary_contents }, "b")
+
+		open_chunk_view(root)
+		local files_win = assert(find_window("chunkfiles"), "files window was opened")
+		local escaped_name = ":(literal)* odd\\x09"
+		local row = assert(
+			find_line_containing(files_win, escaped_name),
+			"binary file is listed: " .. vim.inspect(window_lines(files_win))
+		)
+		vim.api.nvim_set_current_win(files_win)
+		vim.api.nvim_win_set_cursor(files_win, { row, 0 })
+
+		chunk.stage_file()
+		wait_for_refresh("file stage refresh completed")
+		assert_equal(
+			run({ "git", "--literal-pathspecs", "ls-files", "-z", "--", relative_path }, root),
+			relative_path .. "\0",
+			"binary file is staged"
+		)
+		assert_equal(vim.api.nvim_get_current_win(), files_win, "staging keeps sidebar focus")
+		assert_contains(vim.api.nvim_get_current_line(), escaped_name, "staging follows file into staged section")
+
+		chunk.unstage_file()
+		wait_for_refresh("file unstage refresh completed")
+		assert_equal(
+			run({ "git", "--literal-pathspecs", "ls-files", "-z", "--", relative_path }, root),
+			"",
+			"binary file is removed from the index"
+		)
+		assert_equal(vim.api.nvim_get_current_win(), files_win, "unstaging keeps sidebar focus")
+		assert_contains(vim.api.nvim_get_current_line(), escaped_name, "unstaging follows file into changes")
+		assert_equal(table.concat(vim.fn.readfile(full_path, "b")), binary_contents, "unstaging preserves working file")
+
+		chunk.close()
+	end)
+end
+
 test_stage_and_unstage_hunk_update_only_index_and_follow_selection()
 test_rejected_patch_reports_git_error_without_refreshing()
-print("ok 2 tests")
+test_sidebar_stages_binary_unusual_path_and_preserves_selection()
+print("ok 3 tests")

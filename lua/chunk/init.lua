@@ -74,9 +74,33 @@ local function file_stats(file)
 	return additions, deletions
 end
 
-local function append_file_to_model(model, panel_section, line)
+local function display_path(path)
+	return (path:gsub("[%z\1-\31\127]", function(character)
+		return ("\\x%02x"):format(character:byte())
+	end))
+end
+
+local function reconcile_inventory_file(file, inventory_file)
+	if not inventory_file then
+		return
+	end
+
+	local path = inventory_file.path
+	if inventory_file.status == "deleted" then
+		file.old_path = path
+		file.new_path = nil
+	else
+		file.old_path = inventory_file.old_path or (file.old_path and path or nil)
+		file.new_path = path
+	end
+	file.status = inventory_file.status
+end
+
+local function append_file_to_model(model, panel_section, line, inventory_file)
 	local file = line.file
+	reconcile_inventory_file(file, inventory_file)
 	local additions, deletions = file_stats(file)
+	local path = inventory_file and inventory_file.path or file_path_for_line(line) or "(unknown)"
 	local rendered_lines = {
 		{
 			kind = "section_heading",
@@ -86,9 +110,11 @@ local function append_file_to_model(model, panel_section, line)
 	}
 	vim.list_extend(rendered_lines, file.lines)
 	local file_item = {
-		path = file_path_for_line(line) or "(unknown)",
+		path = path,
+		display_path = display_path(path),
+		old_path = inventory_file and inventory_file.old_path or nil,
 		section = line.section,
-		status = file and file.status or "modified",
+		status = file.status or "modified",
 		is_binary = file and file.is_binary or false,
 		additions = additions,
 		deletions = deletions,
@@ -102,7 +128,7 @@ local function append_file_to_model(model, panel_section, line)
 	table.insert(panel_section.files, file_item)
 end
 
-local function append_section_to_model(model, section)
+local function append_section_to_model(model, section, inventory)
 	local lines = parser.flatten(parser.parse(section.diff, {
 		section = section.id,
 	}))
@@ -117,9 +143,11 @@ local function append_section_to_model(model, section)
 	}
 	table.insert(model.panel_sections, panel_section)
 
+	local file_index = 0
 	for _, line in ipairs(lines) do
 		if line.kind == "file_header" then
-			append_file_to_model(model, panel_section, line)
+			file_index = file_index + 1
+			append_file_to_model(model, panel_section, line, inventory and inventory[file_index] or nil)
 		end
 	end
 end
@@ -132,7 +160,7 @@ local function render_model_for_changes(collected)
 	}
 
 	for _, section in ipairs(collected.sections or {}) do
-		append_section_to_model(model, section)
+		append_section_to_model(model, section, collected.inventory and collected.inventory[section.id] or nil)
 	end
 
 	if #model.file_items == 0 then
@@ -359,9 +387,7 @@ local function preview_panel_item(state, row)
 
 	local index = item.kind == "file" and item.file_index or item.preview_file_index
 	local highlight_selection = item.kind == "file"
-	if not index
-		or (index == state.selected_file_index and highlight_selection == state.panel_selection_visible)
-	then
+	if not index or (index == state.selected_file_index and highlight_selection == state.panel_selection_visible) then
 		return
 	end
 
@@ -373,19 +399,26 @@ local function preview_panel_item(state, row)
 	set_cursor_row(state.files_win, state.files_buf, row)
 end
 
-local function restore_files_panel_selection(state, row, identity)
-	local cursor_item = row and state.panel_items[math.min(row, #state.panel_items)] or nil
-	if cursor_item and cursor_item.kind == "folder" then
-		preview_panel_item(state, math.min(row, #state.panel_items))
+local function restore_files_panel_selection(state, row, identity, prefer_identity)
+	local selected = file_index_for_identity(state, identity)
+	if prefer_identity and selected then
+		select_file(state, selected, {
+			focus_diff = false,
+		})
 		return
 	end
 
-	local selected = file_index_for_identity(state, identity)
-	if not selected and row and #state.panel_items > 0 then
-		local clamped_row = math.min(row, #state.panel_items)
-		selected = file_index_at_panel_row(state, clamped_row)
-			or file_index_at_panel_row(state, clamped_row + 1)
-			or file_index_at_panel_row(state, clamped_row - 1)
+	local panel_row = row and #state.panel_items > 0 and math.min(row, #state.panel_items) or nil
+	local cursor_item = panel_row and state.panel_items[panel_row] or nil
+	if cursor_item and cursor_item.kind == "folder" then
+		preview_panel_item(state, panel_row)
+		return
+	end
+
+	if not selected and panel_row then
+		selected = file_index_at_panel_row(state, panel_row)
+			or file_index_at_panel_row(state, panel_row + 1)
+			or file_index_at_panel_row(state, panel_row - 1)
 	end
 
 	if selected then
@@ -406,14 +439,20 @@ local function set_file_navigation_keymaps(buf, maps, next_file, prev_file)
 	set_keymap(buf, maps.prev_file, prev_file, "Previous file")
 end
 
+local function set_index_action_keymaps(buf, maps, mutable, stage, unstage, target)
+	if not mutable then
+		return
+	end
+
+	set_keymap(buf, maps.stage_hunk, stage, "Stage " .. target)
+	set_keymap(buf, maps.unstage_hunk, unstage, "Unstage " .. target)
+end
+
 local function apply_diff_keymaps(buf, mutable)
 	local maps = config.options.keymaps
 
 	set_keymap(buf, maps.open_file, M.open_file_at_cursor, "Open changed file")
-	if mutable then
-		set_keymap(buf, maps.stage_hunk, M.stage_hunk, "Stage hunk")
-		set_keymap(buf, maps.unstage_hunk, M.unstage_hunk, "Unstage hunk")
-	end
+	set_index_action_keymaps(buf, maps, mutable, M.stage_hunk, M.unstage_hunk, "hunk")
 	set_keymap(buf, maps.next_hunk, function()
 		M.jump("hunk", 1)
 	end, "Next hunk")
@@ -423,10 +462,11 @@ local function apply_diff_keymaps(buf, mutable)
 	set_keymap(buf, maps.close, M.close, "Close Chunk diff")
 end
 
-local function apply_files_keymaps(buf)
+local function apply_files_keymaps(buf, mutable)
 	local maps = config.options.keymaps
 
 	set_keymap(buf, maps.select_file, M.select_file_at_cursor, "Show selected file diff")
+	set_index_action_keymaps(buf, maps, mutable, M.stage_file, M.unstage_file, "file")
 	set_file_navigation_keymaps(buf, maps, function()
 		M.select_relative_file(1)
 	end, function()
@@ -755,7 +795,12 @@ local function start_collection(state, start_dir, opts)
 				return
 			end
 			if opts.current_is_files_panel then
-				restore_files_panel_selection(state, opts.files_cursor, opts.selected_identity)
+				restore_files_panel_selection(
+					state,
+					opts.files_cursor,
+					opts.selected_identity,
+					opts.prefer_selected_identity
+				)
 				focus_window(opts.current_win)
 				return
 			end
@@ -774,7 +819,9 @@ local function refresh_state(state, opts)
 	local current_win = vim.api.nvim_get_current_win()
 	local current_is_files_panel = current_buf == state.files_buf
 	local files_cursor = current_is_files_panel and vim.api.nvim_win_get_cursor(0)[1] or nil
-	local selected_identity = current_is_files_panel and file_identity_at_panel_row(state, files_cursor) or nil
+	local selected_identity = current_is_files_panel
+			and (opts.selection or file_identity_at_panel_row(state, files_cursor))
+		or nil
 	local diff_cursor = valid_win(state.diff_win) and vim.api.nvim_win_get_cursor(state.diff_win) or { 1, 0 }
 	local diff_selection = opts.selection
 		or selection_identity_for_line(state.line_map[diff_cursor[1]])
@@ -784,6 +831,7 @@ local function refresh_state(state, opts)
 		current_win = current_win,
 		files_cursor = files_cursor,
 		selected_identity = selected_identity,
+		prefer_selected_identity = opts.selection ~= nil,
 		diff_cursor = diff_cursor,
 		diff_selection = diff_selection,
 	})
@@ -896,7 +944,7 @@ function M.open(args)
 
 	apply_diff_keymaps(state.diff_buf, state.mutable)
 	if valid_buf(state.files_buf) then
-		apply_files_keymaps(state.files_buf)
+		apply_files_keymaps(state.files_buf, state.mutable)
 	end
 	apply_autocmds(state)
 	start_collection(state, start_dir, { initial = true })
@@ -1056,6 +1104,67 @@ function M.unstage_hunk()
 		cursor_message = "Place the cursor on a staged text hunk to unstage it",
 		no_hunk_message = "No text hunk under the cursor; move into a hunk in Staged Changes",
 		wrong_section_message = "This hunk is not staged; use the stage action instead",
+	})
+end
+
+local function apply_file_action(action)
+	local state = current_buffer_state()
+	if not state or vim.api.nvim_get_current_buf() ~= state.files_buf then
+		notify(action.cursor_message, vim.log.levels.WARN)
+		return
+	end
+	if state.mutable == false then
+		notify("Index mutation is unavailable in revision comparisons", vim.log.levels.WARN)
+		return
+	end
+
+	local row = vim.api.nvim_win_get_cursor(0)[1]
+	local item = state.panel_items[row]
+	local file = item and item.kind == "file" and item.file or nil
+	if not file then
+		notify(action.cursor_message, vim.log.levels.WARN)
+		return
+	end
+	if file.section ~= action.source_section then
+		notify(action.wrong_section_message, vim.log.levels.WARN)
+		return
+	end
+
+	local renamed = file.old_path and file.old_path ~= file.path
+	local paths = renamed and { file.path, file.old_path } or { file.path }
+	local ok, err = action.apply(state.root, paths)
+	if not ok then
+		notify(("Could not %s file: %s"):format(action.verb, err), vim.log.levels.ERROR)
+		return
+	end
+
+	M.refresh({
+		selection = {
+			section = action.target_section,
+			path = file.path,
+		},
+	})
+end
+
+function M.stage_file()
+	apply_file_action({
+		verb = "stage",
+		source_section = "unstaged",
+		target_section = "staged",
+		apply = git.stage_file,
+		cursor_message = "Place the cursor on a file in Changes to stage it",
+		wrong_section_message = "This file is already staged; use the unstage action instead",
+	})
+end
+
+function M.unstage_file()
+	apply_file_action({
+		verb = "unstage",
+		source_section = "staged",
+		target_section = "unstaged",
+		apply = git.unstage_file,
+		cursor_message = "Place the cursor on a file in Staged Changes to unstage it",
+		wrong_section_message = "This file is not staged; use the stage action instead",
 	})
 end
 
